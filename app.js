@@ -1,0 +1,828 @@
+/* Suivi chantiers MYL Services / LCQ Bâtiment */
+(function () {
+  'use strict';
+
+  const CFG = window.APP_CONFIG || {};
+  const DEMO = !CFG.API_URL;
+  const SOCIETES = ['MYL Services', 'LCQ Bâtiment'];
+
+  // ---------------------------------------------------------------- stockage local
+  const LS = {
+    get(k, d) { try { const v = localStorage.getItem('ch_' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem('ch_' + k, JSON.stringify(v)); return true; } catch (e) { return false; } }
+  };
+
+  // File d'attente des envois (IndexedDB : garde les photos même sans réseau)
+  const Outbox = {
+    db: null,
+    open() {
+      if (this.db) return Promise.resolve(this.db);
+      return new Promise((res, rej) => {
+        const r = indexedDB.open('chantiers', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('outbox', { keyPath: 'id' });
+        r.onsuccess = () => { this.db = r.result; res(this.db); };
+        r.onerror = () => rej(r.error);
+      });
+    },
+    tx(mode, fn) {
+      return this.open().then(db => new Promise((res, rej) => {
+        const t = db.transaction('outbox', mode);
+        const out = fn(t.objectStore('outbox'));
+        t.oncomplete = () => res(out && out.result);
+        t.onerror = () => rej(t.error);
+      }));
+    },
+    all() { return this.tx('readonly', s => s.getAll()).catch(() => []); },
+    put(item) { return this.tx('readwrite', s => s.put(item)); },
+    del(id) { return this.tx('readwrite', s => s.delete(id)); }
+  };
+
+  // ---------------------------------------------------------------- serveur
+  const Demo = {
+    db() {
+      return LS.get('demoDb', null) || {
+        interventions: [],
+        chantiers: [{ nom: 'Résidence Les Pins', ville: 'Avignon' }],
+        gars: [{ nom: 'Mohamed', prix: 150 }, { nom: 'Karim', prix: 150 }]
+      };
+    },
+    save(db) { return LS.set('demoDb', db); },
+    ensure(list, nom, extra) {
+      if (nom && !list.some(x => x.nom.toLowerCase() === nom.toLowerCase())) list.push(Object.assign({ nom }, extra));
+    },
+    get() { return Promise.resolve(Object.assign({ ok: true, sheetUrl: '' }, this.db())); },
+    post(b) {
+      const db = this.db();
+      if (b.action === 'add') {
+        if (!db.interventions.some(i => i.id === b.id)) {
+          this.ensure(db.chantiers, b.chantier, { ville: b.ville || '' });
+          (b.gars || []).forEach(g => this.ensure(db.gars, g.nom, { prix: g.prix }));
+          db.interventions.push({
+            id: b.id, date: b.date, chantier: b.chantier, ville: b.ville, societe: b.societe, gars: b.gars,
+            total: (b.gars || []).reduce((s, g) => s + (+g.prix || 0), 0), travaux: b.travaux, auteur: b.auteur,
+            createdAt: new Date().toISOString(),
+            photos: (b.photos || []).map(p => 'data:' + p.type + ';base64,' + p.data)
+          });
+        }
+      } else if (b.action === 'addChantier') this.ensure(db.chantiers, b.nom, { ville: b.ville || '' });
+      else if (b.action === 'addGars') {
+        const g = db.gars.find(x => x.nom.toLowerCase() === b.nom.toLowerCase());
+        if (g) g.prix = b.prix; else db.gars.push({ nom: b.nom, prix: b.prix });
+      }
+      if (!this.save(db)) { // mémoire pleine (photos) : on garde sans les photos
+        db.interventions.forEach(i => { i.photos = []; });
+        this.save(db);
+      }
+      return Promise.resolve({ ok: true });
+    }
+  };
+
+  async function apiGet(params) {
+    if (DEMO) return Demo.get(params);
+    const q = new URLSearchParams(Object.assign({}, params, { key: CFG.TEAM_KEY }));
+    const r = await fetch(CFG.API_URL + '?' + q.toString());
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'Erreur serveur');
+    return j;
+  }
+
+  async function apiPost(body) {
+    if (DEMO) return Demo.post(body);
+    // Corps en texte simple : évite le blocage "CORS" des navigateurs avec Google Apps Script
+    const r = await fetch(CFG.API_URL, { method: 'POST', body: JSON.stringify(Object.assign({}, body, { key: CFG.TEAM_KEY })) });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'Erreur serveur');
+    return j;
+  }
+
+  // ---------------------------------------------------------------- état
+  const S = {
+    data: LS.get('cache', { interventions: [], chantiers: [], gars: [], sheetUrl: '' }),
+    outbox: [],
+    vue: 'liste',
+    filtres: LS.get('filtres', { chantier: '', gars: '', societe: '' }),
+    auteur: LS.get('auteur', ''),
+    syncing: false,
+    horsLigne: false,
+    majLe: LS.get('majLe', null),
+    draft: null,
+    recherche: ''
+  };
+
+  // ---------------------------------------------------------------- utilitaires
+  const $ = (s, el) => (el || document).querySelector(s);
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const euros = n => (Number(n) || 0).toLocaleString('fr-FR', { maximumFractionDigits: 2 }) + ' €';
+  const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+  const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+  const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const sameName = (a, b) => String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+
+  function dateLabel(s) {
+    const p = String(s || '').split('-').map(Number);
+    if (p.length !== 3 || !p[0]) return s || '';
+    const d = new Date(p[0], p[1] - 1, p[2]);
+    const t = new Date(); t.setHours(0, 0, 0, 0);
+    const diff = Math.round((t - d) / 86400000);
+    if (diff === 0) return "Aujourd'hui";
+    if (diff === 1) return 'Hier';
+    const o = { weekday: 'long', day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== t.getFullYear()) o.year = 'numeric';
+    return d.toLocaleDateString('fr-FR', o);
+  }
+
+  function badge(soc) {
+    if (soc === 'MYL Services') return '<span class="badge myl">MYL</span>';
+    if (soc === 'LCQ Bâtiment') return '<span class="badge lcq">LCQ</span>';
+    return soc ? '<span class="badge aucune">' + esc(soc) + '</span>' : '';
+  }
+
+  let toastTimer;
+  function toast(msg, ms) {
+    let el = $('#toast');
+    if (!el) { el = document.createElement('div'); el.id = 'toast'; el.className = 'toast'; document.body.appendChild(el); }
+    el.textContent = msg; el.classList.remove('hidden');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.add('hidden'), ms || 2600);
+  }
+
+  // Toutes les interventions : celles en attente d'envoi + celles du serveur
+  function toutes() {
+    const pend = S.outbox.map(o => Object.assign({}, o, {
+      pending: true,
+      total: o.gars.reduce((s, g) => s + (+g.prix || 0), 0),
+      photos: o.photos.map(p => 'data:' + p.type + ';base64,' + p.data)
+    }));
+    const ids = new Set(pend.map(p => p.id));
+    return pend.concat(S.data.interventions.filter(i => !ids.has(i.id)));
+  }
+
+  // Chantiers triés : les plus récemment utilisés d'abord
+  function chantiersTries() {
+    const last = {};
+    toutes().forEach(i => { if (!last[i.chantier] || i.date > last[i.chantier]) last[i.chantier] = i.date; });
+    const list = S.data.chantiers.slice();
+    toutes().forEach(i => { if (i.chantier && !list.some(c => sameName(c.nom, i.chantier))) list.push({ nom: i.chantier, ville: i.ville || '' }); });
+    return list.sort((a, b) => (last[b.nom] || '').localeCompare(last[a.nom] || '') || a.nom.localeCompare(b.nom, 'fr'));
+  }
+
+  function tousLesGars() {
+    const list = S.data.gars.slice();
+    S.outbox.forEach(o => o.gars.forEach(g => { if (!list.some(x => sameName(x.nom, g.nom))) list.push({ nom: g.nom, prix: g.prix }); }));
+    return list.sort((a, b) => a.nom.localeCompare(b.nom, 'fr'));
+  }
+
+  // ---------------------------------------------------------------- synchro
+  async function rafraichir() {
+    try {
+      const j = await apiGet({ action: 'all' });
+      S.data = { interventions: j.interventions || [], chantiers: j.chantiers || [], gars: j.gars || [], sheetUrl: j.sheetUrl || '' };
+      S.horsLigne = false;
+      S.majLe = Date.now();
+      LS.set('cache', S.data);
+      LS.set('majLe', S.majLe);
+    } catch (e) {
+      S.horsLigne = true;
+    }
+    render();
+  }
+
+  async function envoyer() {
+    if (S.syncing) return;
+    S.syncing = true;
+    renderEtat();
+    let erreur = null;
+    for (const item of S.outbox.slice()) {
+      try {
+        const body = Object.assign({ action: 'add' }, item);
+        delete body.createdAt;
+        await apiPost(body);
+        await Outbox.del(item.id);
+        S.outbox = S.outbox.filter(o => o.id !== item.id);
+      } catch (e) { erreur = e; break; }
+    }
+    S.syncing = false;
+    if (erreur && /Code équipe/.test(erreur.message)) toast('⚠️ ' + erreur.message, 5000);
+    await rafraichir();
+  }
+
+  // ---------------------------------------------------------------- rendu
+  function render() {
+    const app = $('#app');
+    if (!S.auteur) { app.innerHTML = vueBienvenue(); return; }
+    app.innerHTML = (S.vue === 'reglages' ? vueReglages() : vueListe()) + nav();
+    renderEtat();
+  }
+
+  function renderEtat() {
+    const el = $('#etat');
+    if (!el) return;
+    let t;
+    if (S.syncing) t = '⏳ Envoi…';
+    else if (S.outbox.length) t = '⏳ ' + S.outbox.length + ' en attente';
+    else if (S.horsLigne) t = '📴 Hors ligne';
+    else if (S.majLe) t = '✓ À jour';
+    else t = '';
+    el.textContent = t;
+  }
+
+  function nav() {
+    return '<nav class="bas">' +
+      '<button class="onglet ' + (S.vue === 'liste' ? 'actif' : '') + '" data-act="vue" data-vue="liste"><span>📋</span>Interventions</button>' +
+      '<button class="fab" data-act="saisie" aria-label="Dicter une intervention"><span>🎤</span></button>' +
+      '<button class="onglet ' + (S.vue === 'reglages' ? 'actif' : '') + '" data-act="vue" data-vue="reglages"><span>⚙️</span>Réglages</button>' +
+      '</nav>';
+  }
+
+  function vueBienvenue() {
+    const noms = ['Aziz'].concat(tousLesGars().map(g => g.nom).filter(n => !sameName(n, 'Aziz')));
+    return '<div class="bienvenue"><div class="logo">👷</div><h2>Bienvenue !</h2>' +
+      '<p>Qui êtes-vous ? <br><span class="note">Votre prénom sera noté sur chaque intervention que vous ajoutez.</span></p>' +
+      '<div class="chips">' + noms.map(n => '<button class="chip" data-act="moi" data-nom="' + esc(n) + '">' + esc(n) + '</button>').join('') + '</div>' +
+      '<div class="bloc"><label class="t">Ou tapez votre prénom</label><input type="text" id="moi-input" autocomplete="given-name" placeholder="Prénom">' +
+      '<button class="btn large" style="margin-top:10px" data-act="moi-ok">C\'est moi</button></div></div>';
+  }
+
+  function filtrer() {
+    const f = S.filtres;
+    const q = norm(S.recherche || '');
+    return toutes().filter(i =>
+      (!f.chantier || i.chantier === f.chantier) &&
+      (!f.societe || i.societe === f.societe) &&
+      (!f.gars || (i.gars || []).some(g => sameName(g.nom, f.gars))) &&
+      (!q || norm([i.chantier, i.ville, i.travaux, i.auteur, (i.gars || []).map(g => g.nom).join(' ')].join(' ')).includes(q)));
+  }
+
+  // Avec un filtre "gars", on compte son prix à lui
+  function totalDe(i) {
+    const f = S.filtres;
+    return f.gars ? (i.gars || []).filter(g => sameName(g.nom, f.gars)).reduce((s, g) => s + (+g.prix || 0), 0) : (+i.total || 0);
+  }
+
+  function statsHtml(list) {
+    const t = new Date(); t.setHours(0, 0, 0, 0);
+    const lundi = new Date(t); lundi.setDate(t.getDate() - ((t.getDay() + 6) % 7));
+    const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    const sem = list.filter(i => i.date >= iso(lundi));
+    const mois = list.filter(i => i.date >= iso(new Date(t.getFullYear(), t.getMonth(), 1)));
+    const somme = l => l.reduce((s, i) => s + totalDe(i), 0);
+    const tuile = (val, lib) => '<div class="tuile"><b>' + val + '</b><span>' + lib + '</span></div>';
+    return tuile(sem.length, 'interv. semaine') + tuile(euros(somme(sem)), 'cette semaine') + tuile(euros(somme(mois)), 'ce mois');
+  }
+
+  function listeHtml(list, toutesNb) {
+    if (!list.length) {
+      return '<div class="vide"><div class="gros">🎤</div><p><b>Aucune intervention' + (toutesNb ? ' trouvée' : ' pour l\'instant') + '.</b></p>' +
+        (toutesNb ? '<button class="btn sec" data-act="effacer">Effacer les filtres</button>' :
+          '<p>Appuyez sur le gros bouton orange et dictez, par exemple :</p><p class="exemple">« Chantier Avignon, aujourd\'hui, Mohamed et Karim, MYL Services, nettoyage fin de chantier, 150 euros chacun. »</p>') +
+        '</div>';
+    }
+    const groupes = {};
+    list.forEach(i => { const k = i.chantier || '(sans chantier)'; (groupes[k] = groupes[k] || []).push(i); });
+    const tri = (a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || '').localeCompare(a.createdAt || '');
+    Object.values(groupes).forEach(g => g.sort(tri));
+    const ordre = Object.keys(groupes).sort((a, b) => tri(groupes[a][0], groupes[b][0]));
+    const plies = LS.get('plies', []);
+    let h = '<div class="resume"><span>' + list.length + ' intervention' + (list.length > 1 ? 's' : '') + ' · ' + ordre.length + ' chantier' + (ordre.length > 1 ? 's' : '') + '</span>' +
+      '<b>' + euros(list.reduce((s, i) => s + totalDe(i), 0)) + (S.filtres.gars ? ' pour ' + esc(S.filtres.gars) : '') + '</b></div>';
+    ordre.forEach(nom => {
+      const g = groupes[nom];
+      const ville = (g.find(i => i.ville) || {}).ville || ((S.data.chantiers.find(c => c.nom === nom) || {}).ville) || '';
+      const plie = plies.includes(nom);
+      h += '<section class="groupe' + (plie ? ' plie' : '') + '">' +
+        '<button class="g-tete" data-act="plier" data-nom="' + esc(nom) + '">' +
+        '<span class="g-ico">🏗️</span><span class="g-nom"><b>' + esc(nom) + '</b>' + (ville && !sameName(ville, nom) ? '<small>📍 ' + esc(ville) + '</small>' : '') + '</span>' +
+        '<span class="g-tot"><b>' + euros(g.reduce((s, i) => s + totalDe(i), 0)) + '</b><small>' + g.length + ' interv.</small></span>' +
+        '<span class="g-fleche">' + (plie ? '▸' : '▾') + '</span></button>' +
+        (plie ? '' : '<div class="g-corps">' + g.map(carte).join('') + '</div>') + '</section>';
+    });
+    return h;
+  }
+
+  function vueListe() {
+    const f = S.filtres;
+    const all = toutes();
+    const list = filtrer();
+    const chantiers = Array.from(new Set(all.map(i => i.chantier).concat(S.data.chantiers.map(c => c.nom)))).filter(Boolean).sort((a, b) => a.localeCompare(b, 'fr'));
+    const gars = tousLesGars().map(g => g.nom);
+    const actif = f.chantier || f.gars || f.societe || S.recherche;
+
+    let h = '<header class="hero"><div class="hero-l1"><div class="titre"><h1>Chantiers</h1><span>MYL Services · LCQ Bâtiment</span></div>' +
+      '<span class="sync" id="etat"></span><button class="rond" data-act="refresh" aria-label="Actualiser">⟳</button></div>' +
+      '<div class="tuiles" id="stats">' + statsHtml(list) + '</div></header><main>';
+    if (DEMO) h += '<div class="demo">Mode essai : les données restent sur ce téléphone.</div>';
+    h += '<div class="recherche"><span>🔍</span><input type="search" id="recherche" placeholder="Rechercher (chantier, travaux, gars…)" value="' + esc(S.recherche || '') + '"></div>' +
+      '<div class="filtres">' +
+      '<div class="seg-f">' + ['', 'MYL Services', 'LCQ Bâtiment'].map(v =>
+        '<button data-act="f-soc" data-v="' + v + '" class="' + (f.societe === v ? 'on ' : '') + (v === 'MYL Services' ? 'myl' : v ? 'lcq' : '') + '">' + (v ? v.split(' ')[0] : 'Tout') + '</button>').join('') + '</div>' +
+      sel('chantier', '🏗️ Chantier', chantiers, f.chantier) +
+      sel('gars', '👷 Gars', gars, f.gars) +
+      (actif ? '<button class="effacer" data-act="effacer" aria-label="Effacer les filtres">✕</button>' : '') + '</div>' +
+      '<div id="liste">' + listeHtml(list, all.length) + '</div>';
+    return h + '</main>';
+  }
+
+  function sel(name, tous, opts, val) {
+    return '<select class="pill' + (val ? ' on' : '') + '" data-filtre="' + name + '"><option value="">' + tous + '</option>' +
+      opts.map(o => '<option' + (o === val ? ' selected' : '') + '>' + esc(o) + '</option>').join('') + '</select>';
+  }
+
+  function srcPhoto(p, taille) {
+    return p.startsWith('data:') ? p : 'https://drive.google.com/thumbnail?id=' + encodeURIComponent(p) + '&sz=w' + taille;
+  }
+
+  function couleur(nom) {
+    let h = 0;
+    for (const c of norm(nom)) h = (h * 31 + c.charCodeAt(0)) % 360;
+    return 'hsl(' + h + ',55%,45%)';
+  }
+
+  function carte(i) {
+    const soc = i.societe === 'MYL Services' ? 'myl' : i.societe === 'LCQ Bâtiment' ? 'lcq' : 'aucune';
+    const nb = (i.photos || []).length;
+    const photos = (i.photos || []).map(p =>
+      '<img loading="lazy" src="' + esc(srcPhoto(p, 400)) + '" data-act="photo" data-id="' + esc(p.startsWith('data:') ? '' : p) + '" ' +
+      'data-full="' + esc(p.startsWith('data:') ? p : srcPhoto(p, 1600)) + '" onerror="window.__photoSecours(this)" alt="Photo">').join('');
+    return '<article class="carte ' + soc + (i.pending ? ' attente' : '') + '">' +
+      '<div class="l1"><span class="date">' + esc(dateLabel(i.date)) + '</span>' +
+      (i.pending ? '<span class="badge attente">⏳ envoi</span>' : badge(i.societe)) + '</div>' +
+      ((i.gars || []).length ? '<div class="gars-l">' + i.gars.map(g =>
+        '<span class="g"><i style="background:' + couleur(g.nom) + '">' + esc(g.nom.charAt(0).toUpperCase()) + '</i>' + esc(g.nom) + '<b>' + euros(g.prix) + '</b></span>').join('') + '</div>' : '') +
+      (i.travaux ? '<div class="travaux">' + esc(i.travaux) + '</div>' : '') +
+      (photos ? '<div class="photos n' + Math.min(nb, 3) + '">' + photos + '</div>' : '') +
+      '<div class="pied"><span>✍️ ' + esc(i.auteur || '?') + (nb ? ' · 📷 ' + nb : '') + '</span>' +
+      '<span class="tot">' + euros(i.total) + '</span></div></article>';
+  }
+
+  // Photo invisible publiquement (compte Google qui bloque le partage) : on la demande au script
+  const photoCache = new Map();
+  window.__photoSecours = async function (img) {
+    const id = img.dataset.id;
+    if (!id || img.dataset.secours) return;
+    img.dataset.secours = '1';
+    try {
+      if (!photoCache.has(id)) {
+        const j = await apiGet({ action: 'photo', id });
+        photoCache.set(id, 'data:' + j.type + ';base64,' + j.data);
+      }
+      img.src = photoCache.get(id);
+      img.dataset.full = photoCache.get(id);
+    } catch (e) { /* hors ligne */ }
+  };
+
+  function vueReglages() {
+    const ch = chantiersTries();
+    const gars = tousLesGars();
+    const url = location.origin + location.pathname;
+    return '<header class="top"><h1>⚙️ Réglages</h1><span class="sync" id="etat"></span></header><main>' +
+      '<div class="bloc"><h3>👤 Vous</h3><p style="margin:0 0 8px">Vous êtes <b>' + esc(S.auteur) + '</b>.</p>' +
+      '<button class="btn sec" data-act="changer-moi">Changer de prénom</button></div>' +
+
+      '<div class="bloc"><h3>🏗️ Chantiers (' + ch.length + ')</h3>' +
+      (ch.length ? '<ul class="liste-simple">' + ch.map(c => '<li><span>' + esc(c.nom) + '</span><small>' + esc(c.ville) + '</small></li>').join('') + '</ul>'
+        : '<p class="note">Aucun chantier pour l\'instant. Ajoutez-les ici, ou dites simplement « chantier … » en dictant : il sera créé tout seul.</p>') +
+      '<div class="ajout"><input type="text" id="ch-nom" placeholder="Nom du chantier"><input type="text" id="ch-ville" placeholder="Ville">' +
+      '<button class="btn" data-act="add-chantier">＋</button></div></div>' +
+
+      '<div class="bloc"><h3>👷 Les gars (' + gars.length + ')</h3>' +
+      (gars.length ? '<ul class="liste-simple">' + gars.map(g => '<li><span>' + esc(g.nom) + '</span><small>' + euros(g.prix) + ' habituel</small></li>').join('') + '</ul>'
+        : '<p class="note">Ajoutez chaque gars avec son prix habituel : l\'appli le reconnaîtra quand vous direz son prénom.</p>') +
+      '<div class="ajout"><input type="text" id="g-nom" placeholder="Prénom"><input type="number" id="g-prix" inputmode="decimal" placeholder="Prix €">' +
+      '<button class="btn" data-act="add-gars">＋</button></div>' +
+      '<p class="note">Pour changer le prix habituel d\'un gars, ajoutez-le à nouveau avec le nouveau prix.</p></div>' +
+
+      '<div class="bloc"><h3>📲 Partager l\'appli aux gars</h3>' +
+      '<button class="btn orange large" data-act="partager">Envoyer le lien (WhatsApp…)</button>' +
+      '<p class="note" style="word-break:break-all">' + esc(url) + '</p>' +
+      '<p class="note"><b>Android :</b> ouvrir le lien dans Chrome → menu ⋮ → « Ajouter à l\'écran d\'accueil ».<br>' +
+      '<b>iPhone :</b> ouvrir le lien dans Safari → bouton Partager ⬆️ → « Sur l\'écran d\'accueil ».</p></div>' +
+
+      (S.data.sheetUrl ? '<div class="bloc"><h3>📊 Tableau Google Sheets</h3><a class="btn sec large" href="' + esc(S.data.sheetUrl) + '" target="_blank" rel="noopener">Ouvrir le tableau</a>' +
+        '<p class="note">Les corrections faites dans le tableau apparaissent dans l\'appli.</p></div>' : '') +
+
+      '<div class="bloc"><h3>💡 Comment dicter</h3><p class="note">Dites tout d\'un coup, dans l\'ordre que vous voulez :<br>' +
+      '<i>« Chantier Avignon, hier, Mohamed et Karim, LCQ Bâtiment, pose du placo, 150 euros chacun. »</i><br><br>' +
+      '• Date : « aujourd\'hui », « hier », « lundi », « le 12 octobre »…<br>' +
+      '• Prix : « 150 euros chacun », « 300 euros au total », « Mohamed 150, Karim 120 euros »<br>' +
+      '• Sans prix dicté, le prix habituel du gars est utilisé.<br>• Tout le reste va dans « Travaux réalisés ».</p></div>' +
+      '</main>';
+  }
+
+  // ---------------------------------------------------------------- saisie
+  function nouveauDraft() {
+    return { transcript: '', date: today(), chantierSel: '', newNom: '', newVille: '', societe: LS.get('lastSociete', ''),
+      gars: [], travaux: '', photos: [], trouve: {} };
+  }
+
+  function ouvrirSaisie(avecMicro) {
+    S.draft = nouveauDraft();
+    const el = document.createElement('div');
+    el.className = 'ecran';
+    el.id = 'saisie';
+    el.innerHTML = '<header class="top"><h1>Nouvelle intervention</h1><button data-act="fermer" aria-label="Fermer">✕</button></header>' +
+      '<main><div class="micro-zone"><button class="micro" id="micro" data-act="micro" aria-label="Dicter">🎤</button>' +
+      '<p class="micro-txt" id="micro-txt">Appuyez et dictez tout d\'un coup</p>' +
+      '<p class="astuce" id="micro-astuce">Chantier, date, gars, société, travaux, prix…</p></div>' +
+      '<div class="bloc"><label class="t" for="dictee">Ce que vous avez dit</label>' +
+      '<textarea id="dictee" placeholder="« Chantier Avignon, aujourd\'hui, Mohamed et Karim, MYL Services, nettoyage fin de chantier, 150 euros chacun »"></textarea>' +
+      '<p class="note" style="margin:6px 0 0">Vous pouvez corriger le texte : les cases se remplissent toutes seules.</p></div>' +
+      '<div id="champs"></div></main>' +
+      '<div class="barre-save"><button class="btn orange" data-act="enregistrer">✅ Enregistrer</button></div>';
+    document.body.appendChild(el);
+    document.body.style.overflow = 'hidden';
+    let t;
+    $('#dictee').addEventListener('input', e => {
+      S.draft.transcript = e.target.value;
+      clearTimeout(t);
+      t = setTimeout(analyser, 500);
+    });
+    renderChamps();
+    if (avecMicro) Micro.start();
+  }
+
+  function fermerSaisie() {
+    Micro.stop(true);
+    const el = $('#saisie');
+    if (el) el.remove();
+    document.body.style.overflow = '';
+    S.draft = null;
+  }
+
+  function analyser() {
+    const d = S.draft;
+    if (!d) return;
+    const res = window.Dictee.parseDictee(d.transcript, { gars: tousLesGars(), chantiers: chantiersTries() });
+    const trouve = {};
+    d.date = res.date; trouve.date = res.dateTrouvee;
+    if (res.chantier) {
+      trouve.chantier = true;
+      if (res.chantier.nouveau) { d.chantierSel = '__new'; d.newNom = res.chantier.nom; d.newVille = ''; }
+      else d.chantierSel = res.chantier.nom;
+    }
+    if (res.societe) { d.societe = res.societe; trouve.societe = true; }
+    else if (d.chantierSel && d.chantierSel !== '__new') {
+      const last = toutes().filter(i => i.chantier === d.chantierSel && i.societe).sort((a, b) => b.date.localeCompare(a.date))[0];
+      if (last) d.societe = last.societe;
+    }
+    if (res.gars.length) { d.gars = res.gars.map(g => ({ nom: g.nom, prix: g.prix, prixDefaut: g.prixDefaut })); trouve.gars = true; }
+    else if (res.prixSeul != null) d.gars.forEach(g => { g.prix = res.prixSeul; g.prixDefaut = false; });
+    d.travaux = res.travaux; trouve.travaux = !!res.travaux;
+    d.trouve = trouve;
+    renderChamps();
+  }
+
+  function renderChamps() {
+    const d = S.draft;
+    const el = $('#champs');
+    if (!d || !el) return;
+    const ok = k => d.trouve[k] ? '<span class="trouve">✓ compris</span>' : '';
+    const ch = chantiersTries();
+    const garsDispo = tousLesGars();
+    d.gars.forEach(g => { if (!garsDispo.some(x => sameName(x.nom, g.nom))) garsDispo.push({ nom: g.nom, prix: g.prix }); });
+    const total = d.gars.reduce((s, g) => s + (+g.prix || 0), 0);
+
+    el.innerHTML =
+      '<div class="bloc">' +
+      '<label class="t" for="f-date">📅 Date ' + ok('date') + '</label><input type="date" id="f-date" value="' + esc(d.date) + '">' +
+      '<label class="t" for="f-chantier">🏗️ Chantier ' + ok('chantier') + '</label>' +
+      '<select id="f-chantier"><option value="">— Choisir —</option>' +
+      ch.map(c => '<option value="' + esc(c.nom) + '"' + (d.chantierSel === c.nom ? ' selected' : '') + '>' + esc(c.nom) + (c.ville && !sameName(c.ville, c.nom) ? ' · ' + esc(c.ville) : '') + '</option>').join('') +
+      '<option value="__new"' + (d.chantierSel === '__new' ? ' selected' : '') + '>➕ Nouveau chantier…</option></select>' +
+      (d.chantierSel === '__new' ? '<div class="new-ch"><input type="text" id="f-newnom" placeholder="Nom du chantier" value="' + esc(d.newNom) + '">' +
+        '<input type="text" id="f-newville" placeholder="Ville" value="' + esc(d.newVille) + '"></div>' : '') +
+      '<label class="t">🏢 Société ' + ok('societe') + '</label><div class="seg">' +
+      '<button data-act="societe" data-v="MYL Services" class="myl ' + (d.societe === 'MYL Services' ? 'on' : '') + '">MYL Services</button>' +
+      '<button data-act="societe" data-v="LCQ Bâtiment" class="lcq ' + (d.societe === 'LCQ Bâtiment' ? 'on' : '') + '">LCQ Bâtiment</button></div>' +
+      '</div>' +
+
+      '<div class="bloc"><label class="t">👷 Gars intervenus ' + ok('gars') + '</label><div class="chips">' +
+      garsDispo.map(g => '<button class="chip ' + (d.gars.some(x => sameName(x.nom, g.nom)) ? 'on' : '') + '" data-act="toggle-gars" data-nom="' + esc(g.nom) + '">' + esc(g.nom) + '</button>').join('') +
+      '<button class="chip plus" data-act="nouveau-gars">＋ Autre</button></div>' +
+      (d.gars.length ? '<div class="prix-l">' + d.gars.map((g, i) =>
+        '<div class="row"><div>' + esc(g.nom) + (g.prixDefaut ? '<small>prix habituel</small>' : '') + '</div>' +
+        '<input type="number" inputmode="decimal" data-prix="' + i + '" value="' + esc(g.prix) + '" aria-label="Prix ' + esc(g.nom) + '"></div>').join('') +
+        '</div><div class="total" id="f-total">Total : ' + euros(total) + '</div>' : '') +
+      '</div>' +
+
+      '<div class="bloc"><label class="t" for="f-travaux">🔨 Travaux réalisés ' + ok('travaux') + '</label>' +
+      '<textarea id="f-travaux" placeholder="Ex. : nettoyage fin de chantier">' + esc(d.travaux) + '</textarea></div>' +
+
+      '<div class="bloc"><label class="t">📷 Photos (' + d.photos.length + ')</label><div class="photos-btn">' +
+      '<button class="btn" data-act="camera">📷 Photo</button><button class="btn sec" data-act="galerie">🖼️ Galerie</button></div>' +
+      '<div class="vignettes">' + d.photos.map((p, i) => '<div><img src="' + p.url + '" alt="Photo ' + (i + 1) + '"><button data-act="suppr-photo" data-i="' + i + '" aria-label="Retirer">✕</button></div>').join('') + '</div>' +
+      '</div>';
+
+    $('#f-date').onchange = e => { d.date = e.target.value; };
+    $('#f-chantier').onchange = e => {
+      d.chantierSel = e.target.value;
+      if (d.chantierSel && d.chantierSel !== '__new' && !d.societe) {
+        const last = toutes().find(i => i.chantier === d.chantierSel && i.societe);
+        if (last) d.societe = last.societe;
+      }
+      renderChamps();
+    };
+    const nn = $('#f-newnom'); if (nn) nn.oninput = e => { d.newNom = e.target.value; };
+    const nv = $('#f-newville'); if (nv) nv.oninput = e => { d.newVille = e.target.value; };
+    $('#f-travaux').oninput = e => { d.travaux = e.target.value; };
+    el.querySelectorAll('[data-prix]').forEach(inp => {
+      inp.oninput = e => {
+        const g = d.gars[+e.target.dataset.prix];
+        g.prix = parseFloat(String(e.target.value).replace(',', '.')) || 0;
+        g.prixDefaut = false;
+        $('#f-total').textContent = 'Total : ' + euros(d.gars.reduce((s, x) => s + (+x.prix || 0), 0));
+      };
+    });
+  }
+
+  // Compression des photos (réseau de chantier souvent faible)
+  function compresser(file) {
+    return new Promise((res, rej) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const max = 1600;
+        const r = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.naturalWidth * r);
+        c.height = Math.round(img.naturalHeight * r);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        res(c.toDataURL('image/jpeg', 0.72));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Photo illisible')); };
+      img.src = url;
+    });
+  }
+
+  async function ajouterPhotos(files) {
+    if (!S.draft) return;
+    for (const f of Array.from(files || [])) {
+      try {
+        const url = await compresser(f);
+        S.draft.photos.push({ url, data: url.split(',')[1] });
+      } catch (e) { toast('Photo illisible'); }
+    }
+    renderChamps();
+  }
+
+  async function enregistrer() {
+    const d = S.draft;
+    Micro.stop(true);
+    let chantier = d.chantierSel === '__new' ? d.newNom.trim() : d.chantierSel;
+    let ville = d.chantierSel === '__new' ? d.newVille.trim() : ((chantiersTries().find(c => c.nom === chantier) || {}).ville || '');
+    if (!chantier) { toast('Choisissez le chantier 🏗️'); $('#f-chantier').focus(); return; }
+    if (!d.gars.length && !confirm('Aucun gars sélectionné. Enregistrer quand même ?')) return;
+    if (!d.societe && !confirm('Aucune société choisie (MYL / LCQ). Enregistrer quand même ?')) return;
+    const item = {
+      id: uid(), date: d.date || today(), chantier, ville, societe: d.societe || '',
+      gars: d.gars.map(g => ({ nom: g.nom, prix: +g.prix || 0 })),
+      travaux: (d.travaux || '').trim(), auteur: S.auteur, createdAt: new Date().toISOString(),
+      photos: d.photos.map(p => ({ type: 'image/jpeg', data: p.data }))
+    };
+    try { await Outbox.put(item); } catch (e) { /* IndexedDB indisponible : on tente quand même l'envoi */ }
+    S.outbox.unshift(item);
+    if (item.societe) LS.set('lastSociete', item.societe);
+    fermerSaisie();
+    S.vue = 'liste';
+    render();
+    toast('✅ Enregistré' + (DEMO ? '' : ' — envoi en cours…'));
+    envoyer();
+  }
+
+  // ---------------------------------------------------------------- micro
+  const Micro = {
+    rec: null, on: false, base: '', fin: '', vides: 0, aParle: false,
+    SR: window.SpeechRecognition || window.webkitSpeechRecognition,
+
+    ui() {
+      const b = $('#micro'), t = $('#micro-txt');
+      if (!b) return;
+      b.classList.toggle('ecoute', this.on);
+      b.textContent = this.on ? '⏹' : '🎤';
+      t.textContent = this.on ? "J'écoute… appuyez pour arrêter" : (S.draft && S.draft.transcript ? 'Appuyez pour compléter' : "Appuyez et dictez tout d'un coup");
+    },
+
+    sansMicro(msg) {
+      this.on = false;
+      this.ui();
+      const a = $('#micro-astuce');
+      if (a) a.innerHTML = '⚠️ ' + msg + '<br>Touchez la case ci-dessous puis le <b>🎤 du clavier</b> pour dicter.';
+      const t = $('#dictee');
+      if (t) t.focus();
+    },
+
+    merge(acc, t) {
+      t = t.trim();
+      if (!acc) return t;
+      if (!t) return acc;
+      const a = acc.toLowerCase(), b = t.toLowerCase();
+      if (b.startsWith(a)) return t;        // bug Android : le texte est répété en entier
+      if (a.endsWith(b)) return acc;
+      return acc + ' ' + t;
+    },
+
+    texte(extra) {
+      return [this.base, this.fin, extra || ''].map(s => s.trim()).filter(Boolean).join(' ');
+    },
+
+    start() {
+      if (!this.SR) { this.sansMicro('La dictée directe n\'est pas disponible ici.'); return; }
+      if (this.on) return;
+      this.on = true;
+      this.base = ($('#dictee').value || '').trim();
+      this.fin = '';
+      this.vides = 0;
+      this.lancer();
+      this.ui();
+    },
+
+    lancer() {
+      const rec = new this.SR();
+      this.rec = rec;
+      rec.lang = 'fr-FR';
+      rec.continuous = true;
+      rec.interimResults = true;
+      this.aParle = false;
+      rec.onresult = e => {
+        let fin = '', interim = '';
+        for (let i = 0; i < e.results.length; i++) {
+          const r = e.results[i];
+          if (r.isFinal) fin = this.merge(fin, r[0].transcript);
+          else interim += ' ' + r[0].transcript;
+        }
+        this.fin = fin;
+        this.aParle = true;
+        const ta = $('#dictee');
+        if (ta) { ta.value = this.texte(interim); S.draft.transcript = this.texte(); }
+      };
+      rec.onerror = e => {
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+          this.rec = null;
+          this.sansMicro('Le micro est bloqué pour l\'appli.');
+        } else if (e.error === 'network') {
+          this.rec = null;
+          this.sansMicro('La dictée a besoin d\'internet.');
+        }
+      };
+      rec.onend = () => {
+        if (this.rec !== rec) { this.finir(); return; }
+        this.base = this.texte();
+        this.fin = '';
+        this.vides = this.aParle ? 0 : this.vides + 1;
+        // Relance tant qu'on n'a pas appuyé sur stop (le téléphone coupe après un silence)
+        if (this.on && this.vides < 2) {
+          try { this.lancer(); return; } catch (err) { /* on arrête */ }
+        }
+        this.on = false;
+        this.finir();
+      };
+      try { rec.start(); } catch (err) { this.sansMicro('Impossible de démarrer la dictée.'); }
+    },
+
+    finir() {
+      this.ui();
+      const ta = $('#dictee');
+      if (ta && S.draft) { S.draft.transcript = ta.value; analyser(); }
+    },
+
+    stop(silencieux) {
+      if (!this.on && !this.rec) return;
+      this.on = false;
+      const rec = this.rec;
+      if (silencieux) this.rec = null;
+      try { rec && rec.stop(); } catch (e) { /* déjà arrêté */ }
+      if (!silencieux) this.ui();
+    },
+
+    toggle() { this.on ? this.stop() : this.start(); }
+  };
+
+  // ---------------------------------------------------------------- actions
+  const actions = {
+    vue(el) { S.vue = el.dataset.vue; render(); window.scrollTo(0, 0); },
+    'f-soc'(el) { S.filtres.societe = el.dataset.v; LS.set('filtres', S.filtres); render(); },
+    effacer() { S.filtres = { chantier: '', gars: '', societe: '' }; S.recherche = ''; LS.set('filtres', S.filtres); render(); },
+    plier(el) {
+      const nom = el.dataset.nom;
+      let p = LS.get('plies', []);
+      p = p.includes(nom) ? p.filter(x => x !== nom) : p.concat(nom);
+      LS.set('plies', p);
+      render();
+    },
+    saisie() { ouvrirSaisie(true); },
+    fermer() {
+      const d = S.draft;
+      if (d && (d.transcript || d.photos.length || d.travaux) && !confirm('Abandonner cette intervention ?')) return;
+      fermerSaisie();
+    },
+    micro() { Micro.toggle(); },
+    societe(el) { S.draft.societe = S.draft.societe === el.dataset.v ? '' : el.dataset.v; renderChamps(); },
+    'toggle-gars'(el) {
+      const d = S.draft, nom = el.dataset.nom;
+      const i = d.gars.findIndex(g => sameName(g.nom, nom));
+      if (i >= 0) d.gars.splice(i, 1);
+      else {
+        const g = tousLesGars().find(x => sameName(x.nom, nom)) || { prix: 0 };
+        d.gars.push({ nom, prix: +g.prix || 0, prixDefaut: true });
+      }
+      renderChamps();
+    },
+    'nouveau-gars'() {
+      const nom = (prompt('Prénom du gars ?') || '').trim();
+      if (!nom) return;
+      const prix = parseFloat(String(prompt('Prix pour ' + nom + ' (€) ?', '') || '0').replace(',', '.')) || 0;
+      S.draft.gars.push({ nom, prix, prixDefaut: false });
+      renderChamps();
+    },
+    camera() { $('#camera').click(); },
+    galerie() { $('#galerie').click(); },
+    'suppr-photo'(el) { S.draft.photos.splice(+el.dataset.i, 1); renderChamps(); },
+    enregistrer() { enregistrer(); },
+    refresh() { toast('Actualisation…', 1200); envoyer(); },
+    photo(el) {
+      const lb = document.createElement('div');
+      lb.className = 'lightbox';
+      lb.innerHTML = '<img alt="Photo" src="' + esc(el.dataset.full || el.src) + '"><button aria-label="Fermer">✕</button>';
+      lb.onclick = () => lb.remove();
+      const big = lb.querySelector('img');
+      big.onerror = () => { if (big.src !== el.src) big.src = el.src; };
+      document.body.appendChild(lb);
+    },
+    moi(el) { setMoi(el.dataset.nom); },
+    'moi-ok'() { setMoi(($('#moi-input').value || '').trim()); },
+    'changer-moi'() {
+      const n = (prompt('Votre prénom ?', S.auteur) || '').trim();
+      if (n) setMoi(n);
+    },
+    async 'add-chantier'() {
+      const nom = $('#ch-nom').value.trim(), ville = $('#ch-ville').value.trim();
+      if (!nom) { toast('Indiquez le nom du chantier'); return; }
+      if (!S.data.chantiers.some(c => sameName(c.nom, nom))) S.data.chantiers.push({ nom, ville });
+      render();
+      try { await apiPost({ action: 'addChantier', nom, ville }); toast('✅ Chantier ajouté'); rafraichir(); }
+      catch (e) { toast('⚠️ Pas de réseau : réessayez plus tard'); }
+    },
+    async 'add-gars'() {
+      const nom = $('#g-nom').value.trim();
+      const prix = parseFloat(String($('#g-prix').value).replace(',', '.')) || 0;
+      if (!nom) { toast('Indiquez le prénom'); return; }
+      const g = S.data.gars.find(x => sameName(x.nom, nom));
+      if (g) g.prix = prix; else S.data.gars.push({ nom, prix });
+      render();
+      try { await apiPost({ action: 'addGars', nom, prix }); toast('✅ ' + nom + ' enregistré'); rafraichir(); }
+      catch (e) { toast('⚠️ Pas de réseau : réessayez plus tard'); }
+    },
+    async partager() {
+      const url = location.origin + location.pathname;
+      const text = 'Appli chantiers MYL / LCQ : ouvre ce lien puis « Ajouter à l\'écran d\'accueil ». ' + url;
+      try {
+        if (navigator.share) { await navigator.share({ title: 'Chantiers', text, url }); return; }
+      } catch (e) { return; }
+      location.href = 'https://wa.me/?text=' + encodeURIComponent(text);
+    }
+  };
+
+  function setMoi(nom) {
+    if (!nom) { toast('Indiquez votre prénom'); return; }
+    S.auteur = nom;
+    LS.set('auteur', nom);
+    render();
+  }
+
+  document.addEventListener('click', e => {
+    const el = e.target.closest('[data-act]');
+    if (!el || !actions[el.dataset.act]) return;
+    e.preventDefault();
+    actions[el.dataset.act](el, e);
+  });
+  document.addEventListener('change', e => {
+    const f = e.target.dataset && e.target.dataset.filtre;
+    if (!f) return;
+    S.filtres[f] = e.target.value;
+    LS.set('filtres', S.filtres);
+    render();
+  });
+  document.addEventListener('input', e => {
+    if (e.target.id !== 'recherche') return;
+    S.recherche = e.target.value;
+    const list = filtrer();
+    $('#liste').innerHTML = listeHtml(list, toutes().length);
+    $('#stats').innerHTML = statsHtml(list);
+  });
+  ['camera', 'galerie'].forEach(id => {
+    document.getElementById(id).addEventListener('change', e => { ajouterPhotos(e.target.files); e.target.value = ''; });
+  });
+  window.addEventListener('online', envoyer);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !S.draft) envoyer(); });
+
+  // ---------------------------------------------------------------- démarrage
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+  render();
+  Outbox.all().then(items => {
+    S.outbox = (items || []).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    render();
+    envoyer();
+  });
+})();
