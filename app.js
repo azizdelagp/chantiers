@@ -879,7 +879,15 @@
 
   // ---------------------------------------------------------------- démarrage
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    // Nouvelle version en ligne : on recharge tout seul une fois
+    const avait = !!navigator.serviceWorker.controller;
+    let recharge = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (avait && !recharge && !S.draft) { recharge = true; location.reload(); }
+    });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+    }).catch(() => {});
   }
   render();
   Outbox.all().then(items => {

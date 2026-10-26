@@ -1,5 +1,5 @@
 // Garde l'appli disponible même sans réseau (les envois partent quand le réseau revient).
-const CACHE = 'chantiers-v4';
+const CACHE = 'chantiers-v5';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'parser.js', 'config.js', 'manifest.webmanifest',
   'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
@@ -18,7 +18,7 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' })
       .then(r => { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return r; })
       .catch(() => caches.match(e.request, { ignoreSearch: true }))
   );
