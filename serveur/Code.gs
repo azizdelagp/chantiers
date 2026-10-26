@@ -259,7 +259,7 @@ function analyser_(b) {
     '{"date":"AAAA-MM-JJ","chantier":{"nom":"","ville":""},"societe":"","gars":[{"nom":"","prix":null}],"travaux":""}'
   ].join('\n');
 
-  const modeles = (props.getProperty('GEMINI_MODEL') || 'gemini-flash-latest,gemini-2.5-flash,gemini-2.0-flash').split(',');
+  const modeles = (props.getProperty('GEMINI_MODEL') || 'gemini-2.5-flash-lite,gemini-flash-lite-latest,gemini-2.5-flash,gemini-2.0-flash').split(',');
   let derniere = '';
   for (const m of modeles) {
     const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + m.trim() + ':generateContent', {
@@ -269,12 +269,13 @@ function analyser_(b) {
       muteHttpExceptions: true,
       payload: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0 }
+        generationConfig: Object.assign({ responseMimeType: 'application/json', temperature: 0 },
+          /2\.5/.test(m) ? { thinkingConfig: { thinkingBudget: 0 } } : {})
       })
     });
     const code = res.getResponseCode();
-    if (code === 404) { derniere = 'Modèle ' + m + ' introuvable'; continue; }
-    if (code !== 200) return { ia: false, error: 'Gemini ' + code + ' : ' + res.getContentText().slice(0, 200) };
+    // Modèle absent, surchargé ou quota atteint : on essaie le suivant
+    if (code !== 200) { derniere = 'Gemini ' + m + ' ' + code + ' : ' + res.getContentText().slice(0, 150); continue; }
     const j = JSON.parse(res.getContentText());
     const txt = (((j.candidates || [])[0] || {}).content || {}).parts;
     if (!txt || !txt[0]) return { ia: false, error: 'Réponse vide' };
