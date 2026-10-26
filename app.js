@@ -3,7 +3,7 @@
   'use strict';
 
   const CFG = window.APP_CONFIG || {};
-  const DEMO = !CFG.API_URL;
+  const DEMO = !CFG.API_URL || /[?&]demo/.test(location.search);
   const SOCIETES = ['MYL Services', 'LCQ Bâtiment'];
 
   // ---------------------------------------------------------------- stockage local
@@ -110,6 +110,22 @@
   };
 
   // ---------------------------------------------------------------- utilitaires
+  const svg = (d, w) => '<svg class="i" viewBox="0 0 24 24" width="' + (w || 22) + '" height="' + (w || 22) + '" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + d + '</svg>';
+  const ICO = {
+    micro: w => svg('<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/>', w),
+    stop: w => svg('<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>', w),
+    liste: w => svg('<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>', w),
+    reglages: w => svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>', w),
+    maj: w => svg('<path d="M21 12a9 9 0 1 1-2.6-6.4L21 8M21 3v5h-5"/>', w),
+    loupe: w => svg('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', w),
+    photo: w => svg('<path d="M3 8a2 2 0 0 1 2-2h2l2-2h6l2 2h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="4"/>', w),
+    galerie: w => svg('<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>', w),
+    fermer: w => svg('<path d="M18 6 6 18M6 6l12 12"/>', w),
+    chevron: w => svg('<path d="m6 9 6 6 6-6"/>', w),
+    plus: w => svg('<path d="M12 5v14M5 12h14"/>', w),
+    lieu: w => svg('<path d="M12 22s7-6.2 7-12a7 7 0 0 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="10" r="2.5"/>', w),
+    partage: w => svg('<path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v14"/>', w)
+  };
   const $ = (s, el) => (el || document).querySelector(s);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const euros = n => (Number(n) || 0).toLocaleString('fr-FR', { maximumFractionDigits: 2 }) + ' €';
@@ -132,8 +148,8 @@
   }
 
   function badge(soc) {
-    if (soc === 'MYL Services') return '<span class="badge myl">MYL</span>';
-    if (soc === 'LCQ Bâtiment') return '<span class="badge lcq">LCQ</span>';
+    if (soc === 'MYL Services') return '<span class="badge myl">MYL Services</span>';
+    if (soc === 'LCQ Bâtiment') return '<span class="badge lcq">LCQ Bâtiment</span>';
     return soc ? '<span class="badge aucune">' + esc(soc) + '</span>' : '';
   }
 
@@ -202,7 +218,7 @@
       } catch (e) { erreur = e; break; }
     }
     S.syncing = false;
-    if (erreur && /Code équipe/.test(erreur.message)) toast('⚠️ ' + erreur.message, 5000);
+    if (erreur && /Code équipe/.test(erreur.message)) toast(erreur.message, 5000);
     await rafraichir();
   }
 
@@ -218,26 +234,26 @@
     const el = $('#etat');
     if (!el) return;
     let t;
-    if (S.syncing) t = '⏳ Envoi…';
-    else if (S.outbox.length) t = '⏳ ' + S.outbox.length + ' en attente';
-    else if (S.horsLigne) t = '📴 Hors ligne';
-    else if (S.majLe) t = '✓ À jour';
+    if (S.syncing) t = 'Envoi…';
+    else if (S.outbox.length) t = S.outbox.length + ' en attente d\'envoi';
+    else if (S.horsLigne) t = 'Hors ligne';
+    else if (S.majLe) t = 'À jour';
     else t = '';
     el.textContent = t;
   }
 
   function nav() {
     return '<nav class="bas">' +
-      '<button class="onglet ' + (S.vue === 'liste' ? 'actif' : '') + '" data-act="vue" data-vue="liste"><span>📋</span>Interventions</button>' +
-      '<button class="fab" data-act="saisie" aria-label="Dicter une intervention"><span>🎤</span></button>' +
-      '<button class="onglet ' + (S.vue === 'reglages' ? 'actif' : '') + '" data-act="vue" data-vue="reglages"><span>⚙️</span>Réglages</button>' +
+      '<button class="onglet ' + (S.vue === 'liste' ? 'actif' : '') + '" data-act="vue" data-vue="liste">' + ICO.liste() + 'Interventions</button>' +
+      '<button class="fab" data-act="saisie" aria-label="Nouvelle intervention">' + ICO.micro(30) + '<span>Nouvelle</span></button>' +
+      '<button class="onglet ' + (S.vue === 'reglages' ? 'actif' : '') + '" data-act="vue" data-vue="reglages">' + ICO.reglages() + 'Réglages</button>' +
       '</nav>';
   }
 
   function vueBienvenue() {
     const noms = ['Aziz'].concat(tousLesGars().map(g => g.nom).filter(n => !sameName(n, 'Aziz')));
-    return '<div class="bienvenue"><div class="logo">👷</div><h2>Bienvenue !</h2>' +
-      '<p>Qui êtes-vous ? <br><span class="note">Votre prénom sera noté sur chaque intervention que vous ajoutez.</span></p>' +
+    return '<div class="bienvenue"><img class="logo" src="icon-192.png" alt=""><h2>Qui êtes-vous ?</h2>' +
+      '<p class="note">Votre prénom sera noté sur chaque intervention que vous ajoutez.</p>' +
       '<div class="chips">' + noms.map(n => '<button class="chip" data-act="moi" data-nom="' + esc(n) + '">' + esc(n) + '</button>').join('') + '</div>' +
       '<div class="bloc"><label class="t">Ou tapez votre prénom</label><input type="text" id="moi-input" autocomplete="given-name" placeholder="Prénom">' +
       '<button class="btn large" style="margin-top:10px" data-act="moi-ok">C\'est moi</button></div></div>';
@@ -266,15 +282,15 @@
     const sem = list.filter(i => i.date >= iso(lundi));
     const mois = list.filter(i => i.date >= iso(new Date(t.getFullYear(), t.getMonth(), 1)));
     const somme = l => l.reduce((s, i) => s + totalDe(i), 0);
-    const tuile = (val, lib) => '<div class="tuile"><b>' + val + '</b><span>' + lib + '</span></div>';
-    return tuile(sem.length, 'interv. semaine') + tuile(euros(somme(sem)), 'cette semaine') + tuile(euros(somme(mois)), 'ce mois');
+    const tuile = (val, lib) => '<div class="tuile"><span>' + lib + '</span><b>' + val + '</b></div>';
+    return tuile(sem.length, 'Interventions cette semaine') + tuile(euros(somme(sem)), 'Cette semaine') + tuile(euros(somme(mois)), 'Ce mois-ci');
   }
 
   function listeHtml(list, toutesNb) {
     if (!list.length) {
-      return '<div class="vide"><div class="gros">🎤</div><p><b>Aucune intervention' + (toutesNb ? ' trouvée' : ' pour l\'instant') + '.</b></p>' +
+      return '<div class="vide"><p class="vide-t">Aucune intervention' + (toutesNb ? ' trouvée' : ' pour l\'instant') + '</p>' +
         (toutesNb ? '<button class="btn sec" data-act="effacer">Effacer les filtres</button>' :
-          '<p>Appuyez sur le gros bouton orange et dictez, par exemple :</p><p class="exemple">« Chantier Avignon, aujourd\'hui, Mohamed et Karim, MYL Services, nettoyage fin de chantier, 150 euros chacun. »</p>') +
+          '<p>Appuyez sur <b>Nouvelle</b> en bas de l\'écran, puis dites tout d\'un coup :</p><p class="exemple">« Chantier Avignon, aujourd\'hui, Mohamed et Karim, MYL Services, nettoyage fin de chantier, 150 euros chacun. »</p>') +
         '</div>';
     }
     const groupes = {};
@@ -291,9 +307,9 @@
       const plie = plies.includes(nom);
       h += '<section class="groupe' + (plie ? ' plie' : '') + '">' +
         '<button class="g-tete" data-act="plier" data-nom="' + esc(nom) + '">' +
-        '<span class="g-ico">🏗️</span><span class="g-nom"><b>' + esc(nom) + '</b>' + (ville && !sameName(ville, nom) ? '<small>📍 ' + esc(ville) + '</small>' : '') + '</span>' +
-        '<span class="g-tot"><b>' + euros(g.reduce((s, i) => s + totalDe(i), 0)) + '</b><small>' + g.length + ' interv.</small></span>' +
-        '<span class="g-fleche">' + (plie ? '▸' : '▾') + '</span></button>' +
+        '<span class="g-nom"><b>' + esc(nom) + '</b><small>' + (ville && !sameName(ville, nom) ? esc(ville) + ' · ' : '') + g.length + ' intervention' + (g.length > 1 ? 's' : '') + '</small></span>' +
+        '<span class="g-tot">' + euros(g.reduce((s, i) => s + totalDe(i), 0)) + '</span>' +
+        '<span class="g-fleche">' + ICO.chevron(18) + '</span></button>' +
         (plie ? '' : '<div class="g-corps">' + g.map(carte).join('') + '</div>') + '</section>';
     });
     return h;
@@ -307,17 +323,17 @@
     const gars = tousLesGars().map(g => g.nom);
     const actif = f.chantier || f.gars || f.societe || S.recherche;
 
-    let h = '<header class="hero"><div class="hero-l1"><div class="titre"><h1>Chantiers</h1><span>MYL Services · LCQ Bâtiment</span></div>' +
-      '<span class="sync" id="etat"></span><button class="rond" data-act="refresh" aria-label="Actualiser">⟳</button></div>' +
-      '<div class="tuiles" id="stats">' + statsHtml(list) + '</div></header><main>';
+    let h = '<header class="tete"><div class="titre"><h1>Suivi chantiers</h1><p>MYL Services · LCQ Bâtiment</p></div>' +
+      '<span class="sync" id="etat"></span><button class="ico-btn" data-act="refresh" aria-label="Actualiser">' + ICO.maj(20) + '</button></header><main>' +
+      '<div class="tuiles" id="stats">' + statsHtml(list) + '</div>';
     if (DEMO) h += '<div class="demo">Mode essai : les données restent sur ce téléphone.</div>';
-    h += '<div class="recherche"><span>🔍</span><input type="search" id="recherche" placeholder="Rechercher (chantier, travaux, gars…)" value="' + esc(S.recherche || '') + '"></div>' +
+    h += '<div class="recherche">' + ICO.loupe(18) + '<input type="search" id="recherche" placeholder="Rechercher (chantier, travaux, gars…)" value="' + esc(S.recherche || '') + '"></div>' +
       '<div class="filtres">' +
       '<div class="seg-f">' + ['', 'MYL Services', 'LCQ Bâtiment'].map(v =>
         '<button data-act="f-soc" data-v="' + v + '" class="' + (f.societe === v ? 'on ' : '') + (v === 'MYL Services' ? 'myl' : v ? 'lcq' : '') + '">' + (v ? v.split(' ')[0] : 'Tout') + '</button>').join('') + '</div>' +
-      sel('chantier', '🏗️ Chantier', chantiers, f.chantier) +
-      sel('gars', '👷 Gars', gars, f.gars) +
-      (actif ? '<button class="effacer" data-act="effacer" aria-label="Effacer les filtres">✕</button>' : '') + '</div>' +
+      sel('chantier', 'Tous les chantiers', chantiers, f.chantier) +
+      sel('gars', 'Tous les gars', gars, f.gars) +
+      (actif ? '<button class="effacer" data-act="effacer">Effacer</button>' : '') + '</div>' +
       '<div id="liste">' + listeHtml(list, all.length) + '</div>';
     return h + '</main>';
   }
@@ -343,15 +359,20 @@
     const photos = (i.photos || []).map(p =>
       '<img loading="lazy" src="' + esc(srcPhoto(p, 400)) + '" data-act="photo" data-id="' + esc(p.startsWith('data:') ? '' : p) + '" ' +
       'data-full="' + esc(p.startsWith('data:') ? p : srcPhoto(p, 1600)) + '" onerror="window.__photoSecours(this)" alt="Photo">').join('');
-    return '<article class="carte ' + soc + (i.pending ? ' attente' : '') + '">' +
-      '<div class="l1"><span class="date">' + esc(dateLabel(i.date)) + '</span>' +
-      (i.pending ? '<span class="badge attente">⏳ envoi</span>' : badge(i.societe)) + '</div>' +
-      ((i.gars || []).length ? '<div class="gars-l">' + i.gars.map(g =>
-        '<span class="g"><i style="background:' + couleur(g.nom) + '">' + esc(g.nom.charAt(0).toUpperCase()) + '</i>' + esc(g.nom) + '<b>' + euros(g.prix) + '</b></span>').join('') + '</div>' : '') +
-      (i.travaux ? '<div class="travaux">' + esc(i.travaux) + '</div>' : '') +
+    const p = String(i.date || '').split('-').map(Number);
+    const d = p.length === 3 && p[0] ? new Date(p[0], p[1] - 1, p[2]) : null;
+    const rel = dateLabel(i.date);
+    const colDate = d ? '<div class="c-date"><small>' + d.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '') + '</small><b>' + d.getDate() + '</b><small>' +
+      d.toLocaleDateString('fr-FR', { month: 'short' }).replace('.', '') + '</small></div>' : '<div class="c-date"></div>';
+    return '<article class="carte ' + soc + (i.pending ? ' attente' : '') + '">' + colDate + '<div class="c-corps">' +
+      '<div class="l1"><span class="rel">' + (rel === "Aujourd'hui" || rel === 'Hier' ? rel : '') + '</span>' +
+      (i.pending ? '<span class="badge attente">En attente d\'envoi</span>' : badge(i.societe)) + '</div>' +
+      (i.travaux ? '<p class="travaux">' + esc(i.travaux) + '</p>' : '<p class="travaux vide-tr">Travaux non précisés</p>') +
+      ((i.gars || []).length ? '<ul class="gars-l">' + i.gars.map(g =>
+        '<li>' + esc(g.nom) + ' <b>' + euros(g.prix) + '</b></li>').join('') + '</ul>' : '') +
       (photos ? '<div class="photos n' + Math.min(nb, 3) + '">' + photos + '</div>' : '') +
-      '<div class="pied"><span>✍️ ' + esc(i.auteur || '?') + (nb ? ' · 📷 ' + nb : '') + '</span>' +
-      '<span class="tot">' + euros(i.total) + '</span></div></article>';
+      '<div class="pied"><span>Ajouté par ' + esc(i.auteur || '?') + (nb ? ' · ' + nb + ' photo' + (nb > 1 ? 's' : '') : '') + '</span>' +
+      '<span class="tot">' + euros(i.total) + '</span></div></div></article>';
   }
 
   // Photo invisible publiquement (compte Google qui bloque le partage) : on la demande au script
@@ -374,33 +395,33 @@
     const ch = chantiersTries();
     const gars = tousLesGars();
     const url = location.origin + location.pathname;
-    return '<header class="top"><h1>⚙️ Réglages</h1><span class="sync" id="etat"></span></header><main>' +
-      '<div class="bloc"><h3>👤 Vous</h3><p style="margin:0 0 8px">Vous êtes <b>' + esc(S.auteur) + '</b>.</p>' +
+    return '<header class="tete"><div class="titre"><h1>Réglages</h1><p>Chantiers, gars et partage</p></div><span class="sync" id="etat"></span></header><main>' +
+      '<div class="bloc"><h3>Vous</h3><p style="margin:0 0 8px">Vous êtes <b>' + esc(S.auteur) + '</b>.</p>' +
       '<button class="btn sec" data-act="changer-moi">Changer de prénom</button></div>' +
 
-      '<div class="bloc"><h3>🏗️ Chantiers (' + ch.length + ')</h3>' +
+      '<div class="bloc"><h3>Chantiers <small>' + ch.length + '</small></h3>' +
       (ch.length ? '<ul class="liste-simple">' + ch.map(c => '<li><span>' + esc(c.nom) + '</span><small>' + esc(c.ville) + '</small></li>').join('') + '</ul>'
         : '<p class="note">Aucun chantier pour l\'instant. Ajoutez-les ici, ou dites simplement « chantier … » en dictant : il sera créé tout seul.</p>') +
       '<div class="ajout"><input type="text" id="ch-nom" placeholder="Nom du chantier"><input type="text" id="ch-ville" placeholder="Ville">' +
-      '<button class="btn" data-act="add-chantier">＋</button></div></div>' +
+      '<button class="btn" data-act="add-chantier" aria-label="Ajouter le chantier">' + ICO.plus(20) + '</button></div></div>' +
 
-      '<div class="bloc"><h3>👷 Les gars (' + gars.length + ')</h3>' +
+      '<div class="bloc"><h3>Les gars <small>' + gars.length + '</small></h3>' +
       (gars.length ? '<ul class="liste-simple">' + gars.map(g => '<li><span>' + esc(g.nom) + '</span><small>' + euros(g.prix) + ' habituel</small></li>').join('') + '</ul>'
         : '<p class="note">Ajoutez chaque gars avec son prix habituel : l\'appli le reconnaîtra quand vous direz son prénom.</p>') +
       '<div class="ajout"><input type="text" id="g-nom" placeholder="Prénom"><input type="number" id="g-prix" inputmode="decimal" placeholder="Prix €">' +
-      '<button class="btn" data-act="add-gars">＋</button></div>' +
+      '<button class="btn" data-act="add-gars" aria-label="Ajouter le gars">' + ICO.plus(20) + '</button></div>' +
       '<p class="note">Pour changer le prix habituel d\'un gars, ajoutez-le à nouveau avec le nouveau prix.</p></div>' +
 
-      '<div class="bloc"><h3>📲 Partager l\'appli aux gars</h3>' +
-      '<button class="btn orange large" data-act="partager">Envoyer le lien (WhatsApp…)</button>' +
+      '<div class="bloc"><h3>Partager l\'appli aux gars</h3>' +
+      '<button class="btn jaune large" data-act="partager">' + ICO.partage(20) + 'Envoyer le lien</button>' +
       '<p class="note" style="word-break:break-all">' + esc(url) + '</p>' +
       '<p class="note"><b>Android :</b> ouvrir le lien dans Chrome → menu ⋮ → « Ajouter à l\'écran d\'accueil ».<br>' +
-      '<b>iPhone :</b> ouvrir le lien dans Safari → bouton Partager ⬆️ → « Sur l\'écran d\'accueil ».</p></div>' +
+      '<b>iPhone :</b> ouvrir le lien dans Safari → bouton Partager → « Sur l\'écran d\'accueil ».</p></div>' +
 
-      (S.data.sheetUrl ? '<div class="bloc"><h3>📊 Tableau Google Sheets</h3><a class="btn sec large" href="' + esc(S.data.sheetUrl) + '" target="_blank" rel="noopener">Ouvrir le tableau</a>' +
+      (S.data.sheetUrl ? '<div class="bloc"><h3>Tableau Google Sheets</h3><a class="btn sec large" href="' + esc(S.data.sheetUrl) + '" target="_blank" rel="noopener">Ouvrir le tableau</a>' +
         '<p class="note">Les corrections faites dans le tableau apparaissent dans l\'appli.</p></div>' : '') +
 
-      '<div class="bloc"><h3>💡 Comment dicter</h3><p class="note">Dites tout d\'un coup, dans l\'ordre que vous voulez :<br>' +
+      '<div class="bloc"><h3>Comment dicter</h3><p class="note">Dites tout d\'un coup, dans l\'ordre que vous voulez :<br>' +
       '<i>« Chantier Avignon, hier, Mohamed et Karim, LCQ Bâtiment, pose du placo, 150 euros chacun. »</i><br><br>' +
       '• Date : « aujourd\'hui », « hier », « lundi », « le 12 octobre »…<br>' +
       '• Prix : « 150 euros chacun », « 300 euros au total », « Mohamed 150, Karim 120 euros »<br>' +
@@ -419,15 +440,15 @@
     const el = document.createElement('div');
     el.className = 'ecran';
     el.id = 'saisie';
-    el.innerHTML = '<header class="top"><h1>Nouvelle intervention</h1><button data-act="fermer" aria-label="Fermer">✕</button></header>' +
-      '<main><div class="micro-zone"><button class="micro" id="micro" data-act="micro" aria-label="Dicter">🎤</button>' +
-      '<p class="micro-txt" id="micro-txt">Appuyez et dictez tout d\'un coup</p>' +
-      '<p class="astuce" id="micro-astuce">Chantier, date, gars, société, travaux, prix…</p></div>' +
-      '<div class="bloc"><label class="t" for="dictee">Ce que vous avez dit</label>' +
-      '<textarea id="dictee" placeholder="« Chantier Avignon, aujourd\'hui, Mohamed et Karim, MYL Services, nettoyage fin de chantier, 150 euros chacun »"></textarea>' +
-      '<p class="note" style="margin:6px 0 0">Vous pouvez corriger le texte : les cases se remplissent toutes seules.</p></div>' +
+    el.innerHTML = '<header class="tete"><div class="titre"><h1>Nouvelle intervention</h1></div><button class="ico-btn" data-act="fermer" aria-label="Fermer">' + ICO.fermer(22) + '</button></header>' +
+      '<main><section class="etape"><h2><span>1</span>Parlez</h2>' +
+      '<div class="micro-zone"><button class="micro" id="micro" data-act="micro" aria-label="Dicter">' + ICO.micro(54) + '</button>' +
+      '<p class="micro-txt" id="micro-txt">Appuyez et dites tout d\'un coup</p>' +
+      '<p class="astuce" id="micro-astuce">Le chantier, la date, qui a travaillé, la société, les travaux et les prix.</p></div>' +
+      '<label class="t" for="dictee">Ce que vous avez dit</label>' +
+      '<textarea id="dictee" placeholder="Exemple : chantier Avignon, aujourd\'hui, Mohamed et Karim, MYL Services, nettoyage fin de chantier, 150 euros chacun"></textarea></section>' +
       '<div id="champs"></div></main>' +
-      '<div class="barre-save"><button class="btn orange" data-act="enregistrer">✅ Enregistrer</button></div>';
+      '<div class="barre-save"><button class="btn jaune" data-act="enregistrer">Enregistrer l\'intervention</button></div>';
     document.body.appendChild(el);
     document.body.style.overflow = 'hidden';
     let t;
@@ -492,16 +513,16 @@
     d.analyseDe = texte;
     if (DEMO || texte.length < 8) return Promise.resolve();
     const seq = ++iaSeq;
-    statutIA('🤖 L\'IA range votre dictée…');
+    statutIA('<span class="spin"></span> Rangement de votre dictée…');
     const t = new Date();
     d.iaEnCours = apiPost({ action: 'analyser', texte,
       aujourdhui: today(), jour: t.toLocaleDateString('fr-FR', { weekday: 'long' }) })
       .then(j => {
         if (seq !== iaSeq || !S.draft) return;
-        if (j.ia && j.resultat) { appliquer(j.resultat); statutIA('✅ Rangé par l\'IA — vérifiez puis enregistrez'); }
-        else statutIA(j.error ? '⚠️ IA indisponible, rangement simple utilisé' : 'Rangement simple (IA pas encore activée)');
+        if (j.ia && j.resultat) { appliquer(j.resultat); statutIA('<b class="ok">C\'est rangé.</b> Vérifiez ci-dessous puis enregistrez.'); }
+        else statutIA('Rangement simple utilisé. Vérifiez les cases ci-dessous.');
       })
-      .catch(() => { if (seq === iaSeq) statutIA('📴 Pas de réseau : rangement simple utilisé'); });
+      .catch(() => { if (seq === iaSeq) statutIA('Pas de réseau : rangement simple utilisé. Vérifiez les cases.'); });
     return d.iaEnCours;
   }
 
@@ -509,42 +530,39 @@
     const d = S.draft;
     const el = $('#champs');
     if (!d || !el) return;
-    const ok = k => d.trouve[k] ? '<span class="trouve">✓ compris</span>' : '';
+    const ok = k => d.trouve[k] ? '<span class="trouve">rempli</span>' : '';
     const ch = chantiersTries();
     const garsDispo = tousLesGars();
     d.gars.forEach(g => { if (!garsDispo.some(x => sameName(x.nom, g.nom))) garsDispo.push({ nom: g.nom, prix: g.prix }); });
     const total = d.gars.reduce((s, g) => s + (+g.prix || 0), 0);
 
     el.innerHTML =
-      '<div class="bloc">' +
-      '<label class="t" for="f-date">📅 Date ' + ok('date') + '</label><input type="date" id="f-date" value="' + esc(d.date) + '">' +
-      '<label class="t" for="f-chantier">🏗️ Chantier ' + ok('chantier') + '</label>' +
+      '<section class="etape"><h2><span>2</span>Vérifiez</h2><p class="note">Les cases se remplissent toutes seules. Corrigez si besoin.</p>' +
+      '<label class="t" for="f-date">Date ' + ok('date') + '</label><input type="date" id="f-date" value="' + esc(d.date) + '">' +
+      '<label class="t" for="f-chantier">Chantier ' + ok('chantier') + '</label>' +
       '<select id="f-chantier"><option value="">— Choisir —</option>' +
       ch.map(c => '<option value="' + esc(c.nom) + '"' + (d.chantierSel === c.nom ? ' selected' : '') + '>' + esc(c.nom) + (c.ville && !sameName(c.ville, c.nom) ? ' · ' + esc(c.ville) : '') + '</option>').join('') +
-      '<option value="__new"' + (d.chantierSel === '__new' ? ' selected' : '') + '>➕ Nouveau chantier…</option></select>' +
+      '<option value="__new"' + (d.chantierSel === '__new' ? ' selected' : '') + '>+ Nouveau chantier…</option></select>' +
       (d.chantierSel === '__new' ? '<div class="new-ch"><input type="text" id="f-newnom" placeholder="Nom du chantier" value="' + esc(d.newNom) + '">' +
         '<input type="text" id="f-newville" placeholder="Ville" value="' + esc(d.newVille) + '"></div>' : '') +
-      '<label class="t">🏢 Société ' + ok('societe') + '</label><div class="seg">' +
+      '<label class="t">Société ' + ok('societe') + '</label><div class="seg">' +
       '<button data-act="societe" data-v="MYL Services" class="myl ' + (d.societe === 'MYL Services' ? 'on' : '') + '">MYL Services</button>' +
       '<button data-act="societe" data-v="LCQ Bâtiment" class="lcq ' + (d.societe === 'LCQ Bâtiment' ? 'on' : '') + '">LCQ Bâtiment</button></div>' +
-      '</div>' +
 
-      '<div class="bloc"><label class="t">👷 Gars intervenus ' + ok('gars') + '</label><div class="chips">' +
+      '<label class="t">Qui a travaillé ' + ok('gars') + '</label><div class="chips">' +
       garsDispo.map(g => '<button class="chip ' + (d.gars.some(x => sameName(x.nom, g.nom)) ? 'on' : '') + '" data-act="toggle-gars" data-nom="' + esc(g.nom) + '">' + esc(g.nom) + '</button>').join('') +
-      '<button class="chip plus" data-act="nouveau-gars">＋ Autre</button></div>' +
+      '<button class="chip plus" data-act="nouveau-gars">+ Autre</button></div>' +
       (d.gars.length ? '<div class="prix-l">' + d.gars.map((g, i) =>
         '<div class="row"><div>' + esc(g.nom) + (g.prixDefaut ? '<small>prix habituel</small>' : '') + '</div>' +
         '<input type="number" inputmode="decimal" data-prix="' + i + '" value="' + esc(g.prix) + '" aria-label="Prix ' + esc(g.nom) + '"></div>').join('') +
         '</div><div class="total" id="f-total">Total : ' + euros(total) + '</div>' : '') +
-      '</div>' +
+      '<label class="t" for="f-travaux">Travaux réalisés ' + ok('travaux') + '</label>' +
+      '<textarea id="f-travaux" placeholder="Ex. : nettoyage fin de chantier">' + esc(d.travaux) + '</textarea></section>' +
 
-      '<div class="bloc"><label class="t" for="f-travaux">🔨 Travaux réalisés ' + ok('travaux') + '</label>' +
-      '<textarea id="f-travaux" placeholder="Ex. : nettoyage fin de chantier">' + esc(d.travaux) + '</textarea></div>' +
-
-      '<div class="bloc"><label class="t">📷 Photos (' + d.photos.length + ')</label><div class="photos-btn">' +
-      '<button class="btn" data-act="camera">📷 Photo</button><button class="btn sec" data-act="galerie">🖼️ Galerie</button></div>' +
-      '<div class="vignettes">' + d.photos.map((p, i) => '<div><img src="' + p.url + '" alt="Photo ' + (i + 1) + '"><button data-act="suppr-photo" data-i="' + i + '" aria-label="Retirer">✕</button></div>').join('') + '</div>' +
-      '</div>';
+      '<section class="etape"><h2><span>3</span>Photos <small>' + (d.photos.length || '') + '</small></h2><div class="photos-btn">' +
+      '<button class="btn" data-act="camera">' + ICO.photo(20) + 'Photo</button><button class="btn sec" data-act="galerie">' + ICO.galerie(20) + 'Galerie</button></div>' +
+      '<div class="vignettes">' + d.photos.map((p, i) => '<div><img src="' + p.url + '" alt="Photo ' + (i + 1) + '"><button data-act="suppr-photo" data-i="' + i + '" aria-label="Retirer">' + ICO.fermer(14) + '</button></div>').join('') + '</div>' +
+      '</section>';
 
     $('#f-date').onchange = e => { d.date = e.target.value; };
     $('#f-chantier').onchange = e => {
@@ -607,14 +625,14 @@
     // On n'enregistre pas une dictée pas encore rangée
     if ((d.transcript || '').trim() !== (d.analyseDe || '')) analyser();
     if (d.iaEnCours) {
-      toast('🤖 Rangement en cours…', 1500);
+      toast('Rangement en cours…', 1500);
       await Promise.race([d.iaEnCours, new Promise(r => setTimeout(r, 15000))]);
       d.iaEnCours = null;
       if (!S.draft) return;
     }
     let chantier = d.chantierSel === '__new' ? d.newNom.trim() : d.chantierSel;
     let ville = d.chantierSel === '__new' ? d.newVille.trim() : ((chantiersTries().find(c => c.nom === chantier) || {}).ville || '');
-    if (!chantier) { toast('Choisissez le chantier 🏗️'); $('#f-chantier').focus(); return; }
+    if (!chantier) { toast('Choisissez le chantier'); $('#f-chantier').focus(); return; }
     if (!d.gars.length && !confirm('Aucun gars sélectionné. Enregistrer quand même ?')) return;
     if (!d.societe && !confirm('Aucune société choisie (MYL / LCQ). Enregistrer quand même ?')) return;
     const item = {
@@ -629,7 +647,7 @@
     fermerSaisie();
     S.vue = 'liste';
     render();
-    toast('✅ Enregistré' + (DEMO ? '' : ' — envoi en cours…'));
+    toast('Intervention enregistrée');
     envoyer();
   }
 
@@ -642,15 +660,15 @@
       const b = $('#micro'), t = $('#micro-txt');
       if (!b) return;
       b.classList.toggle('ecoute', this.on);
-      b.textContent = this.on ? '⏹' : '🎤';
-      t.textContent = this.on ? "J'écoute… appuyez pour arrêter" : (S.draft && S.draft.transcript ? 'Appuyez pour compléter' : "Appuyez et dictez tout d'un coup");
+      b.innerHTML = this.on ? ICO.stop(44) : ICO.micro(54);
+      t.textContent = this.on ? "J'écoute… appuyez pour terminer" : (S.draft && S.draft.transcript ? 'Appuyez pour ajouter quelque chose' : "Appuyez et dites tout d'un coup");
     },
 
     sansMicro(msg) {
       this.on = false;
       this.ui();
       const a = $('#micro-astuce');
-      if (a) a.innerHTML = '⚠️ ' + msg + '<br>Touchez la case ci-dessous puis le <b>🎤 du clavier</b> pour dicter.';
+      if (a) a.innerHTML = msg + '<br>Touchez la case ci-dessous, puis le <b>micro du clavier</b> pour dicter.';
       const t = $('#dictee');
       if (t) t.focus();
     },
@@ -786,7 +804,7 @@
     photo(el) {
       const lb = document.createElement('div');
       lb.className = 'lightbox';
-      lb.innerHTML = '<img alt="Photo" src="' + esc(el.dataset.full || el.src) + '"><button aria-label="Fermer">✕</button>';
+      lb.innerHTML = '<img alt="Photo" src="' + esc(el.dataset.full || el.src) + '"><button aria-label="Fermer">' + ICO.fermer(22) + '</button>';
       lb.onclick = () => lb.remove();
       const big = lb.querySelector('img');
       big.onerror = () => { if (big.src !== el.src) big.src = el.src; };
@@ -803,8 +821,8 @@
       if (!nom) { toast('Indiquez le nom du chantier'); return; }
       if (!S.data.chantiers.some(c => sameName(c.nom, nom))) S.data.chantiers.push({ nom, ville });
       render();
-      try { await apiPost({ action: 'addChantier', nom, ville }); toast('✅ Chantier ajouté'); rafraichir(); }
-      catch (e) { toast('⚠️ Pas de réseau : réessayez plus tard'); }
+      try { await apiPost({ action: 'addChantier', nom, ville }); toast('Chantier ajouté'); rafraichir(); }
+      catch (e) { toast('Pas de réseau : réessayez plus tard'); }
     },
     async 'add-gars'() {
       const nom = $('#g-nom').value.trim();
@@ -813,8 +831,8 @@
       const g = S.data.gars.find(x => sameName(x.nom, nom));
       if (g) g.prix = prix; else S.data.gars.push({ nom, prix });
       render();
-      try { await apiPost({ action: 'addGars', nom, prix }); toast('✅ ' + nom + ' enregistré'); rafraichir(); }
-      catch (e) { toast('⚠️ Pas de réseau : réessayez plus tard'); }
+      try { await apiPost({ action: 'addGars', nom, prix }); toast(nom + ' enregistré'); rafraichir(); }
+      catch (e) { toast('Pas de réseau : réessayez plus tard'); }
     },
     async partager() {
       const url = location.origin + location.pathname;

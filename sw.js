@@ -1,5 +1,5 @@
 // Garde l'appli disponible même sans réseau (les envois partent quand le réseau revient).
-const CACHE = 'chantiers-v3';
+const CACHE = 'chantiers-v4';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'parser.js', 'config.js', 'manifest.webmanifest',
   'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
