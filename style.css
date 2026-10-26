@@ -256,3 +256,13 @@ header.tete { border-bottom: 0; padding-bottom: 4px; }
 .pied { border-top: 0; padding-top: 2px; }
 .gars-l { margin-bottom: 6px; }
 .photos { margin-bottom: 8px; }
+
+/* ---------- Modifier / supprimer ---------- */
+.carte { cursor: pointer; }
+.carte:active { background: #faf6ea; }
+.pied u { color: var(--encre); font-weight: 600; text-underline-offset: 3px; }
+.etape.replie .micro { width: 76px; height: 76px; box-shadow: 0 0 0 5px var(--jaune-l); }
+.etape.replie .micro .i { width: 34px; height: 34px; }
+.etape.replie .micro-txt { margin-top: 10px; font-size: 16px; }
+.btn-suppr { display: block; width: 100%; margin: 6px 0 24px; padding: 14px; border: 1px solid #e7b9b4; border-radius: 10px;
+  background: #fff; color: var(--rouge); font-weight: 700; font-size: 16px; }

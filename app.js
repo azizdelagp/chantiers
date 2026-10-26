@@ -64,7 +64,14 @@
             photos: (b.photos || []).map(p => 'data:' + p.type + ';base64,' + p.data)
           });
         }
-      } else if (b.action === 'addChantier') this.ensure(db.chantiers, b.nom, { ville: b.ville || '' });
+      } else if (b.action === 'update') {
+        const i = db.interventions.find(x => x.id === b.id);
+        if (!i) throw new Error('Intervention introuvable');
+        Object.assign(i, { date: b.date, chantier: b.chantier, ville: b.ville, societe: b.societe, gars: b.gars, travaux: b.travaux,
+          total: (b.gars || []).reduce((s, g) => s + (+g.prix || 0), 0),
+          photos: (b.garder || []).concat((b.photos || []).map(p => 'data:' + p.type + ';base64,' + p.data)) });
+      } else if (b.action === 'delete') db.interventions = db.interventions.filter(x => x.id !== b.id);
+      else if (b.action === 'addChantier') this.ensure(db.chantiers, b.nom, { ville: b.ville || '' });
       else if (b.action === 'addGars') {
         const g = db.gars.find(x => x.nom.toLowerCase() === b.nom.toLowerCase());
         if (g) g.prix = b.prix; else db.gars.push({ nom: b.nom, prix: b.prix });
@@ -164,13 +171,14 @@
   }
 
   // Toutes les interventions : celles en attente d'envoi + celles du serveur
+  // (une modification ou suppression en attente remplace la version du serveur)
   function toutes() {
-    const pend = S.outbox.map(o => Object.assign({}, o, {
+    const pend = S.outbox.filter(o => o.action !== 'delete').map(o => Object.assign({}, o, {
       pending: true,
-      total: o.gars.reduce((s, g) => s + (+g.prix || 0), 0),
-      photos: o.photos.map(p => 'data:' + p.type + ';base64,' + p.data)
+      total: (o.gars || []).reduce((s, g) => s + (+g.prix || 0), 0),
+      photos: (o.garder || []).concat((o.photos || []).map(p => 'data:' + p.type + ';base64,' + p.data))
     }));
-    const ids = new Set(pend.map(p => p.id));
+    const ids = new Set(S.outbox.map(o => o.id));
     return pend.concat(S.data.interventions.filter(i => !ids.has(i.id)));
   }
 
@@ -185,7 +193,7 @@
 
   function tousLesGars() {
     const list = S.data.gars.slice();
-    S.outbox.forEach(o => o.gars.forEach(g => { if (!list.some(x => sameName(x.nom, g.nom))) list.push({ nom: g.nom, prix: g.prix }); }));
+    S.outbox.forEach(o => (o.gars || []).forEach(g => { if (!list.some(x => sameName(x.nom, g.nom))) list.push({ nom: g.nom, prix: g.prix }); }));
     return list.sort((a, b) => a.nom.localeCompare(b.nom, 'fr'));
   }
 
@@ -211,12 +219,21 @@
     let erreur = null;
     for (const item of S.outbox.slice()) {
       try {
-        const body = Object.assign({ action: 'add' }, item);
+        const body = Object.assign({}, item, { action: item.action || 'add' });
         delete body.createdAt;
         await apiPost(body);
         await Outbox.del(item.id);
         S.outbox = S.outbox.filter(o => o.id !== item.id);
-      } catch (e) { erreur = e; break; }
+      } catch (e) {
+        // Intervention supprimée entre-temps par quelqu'un d'autre : on abandonne cette modification
+        if (/introuvable/i.test(e.message)) {
+          await Outbox.del(item.id).catch(() => {});
+          S.outbox = S.outbox.filter(o => o.id !== item.id);
+          toast(e.message, 4000);
+          continue;
+        }
+        erreur = e; break;
+      }
     }
     S.syncing = false;
     if (erreur && /Code équipe/.test(erreur.message)) toast(erreur.message, 5000);
@@ -382,7 +399,7 @@
     const rel = dateLabel(i.date);
     const colDate = d ? '<div class="c-date"><small>' + d.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '') + '</small><b>' + d.getDate() + '</b><small>' +
       d.toLocaleDateString('fr-FR', { month: 'short' }).replace('.', '') + '</small></div>' : '<div class="c-date"></div>';
-    return '<article class="carte ' + soc + (i.pending ? ' attente' : '') + '">' + colDate + '<div class="c-corps">' +
+    return '<article class="carte ' + soc + (i.pending ? ' attente' : '') + '" data-act="ouvrir" data-id="' + esc(i.id) + '">' + colDate + '<div class="c-corps">' +
       '<div class="l1"><span class="rel">' + (rel === "Aujourd'hui" || rel === 'Hier' ? rel : '') + '</span>' +
       (i.pending ? '<span class="badge attente">En attente d\'envoi</span>' : badge(i.societe)) + '</div>' +
       (montrerChantier ? '<p class="c-chantier">' + ICO.lieu(15) + esc(i.chantier || 'Sans chantier') + (i.ville && !sameName(i.ville, i.chantier) ? ' <small>· ' + esc(i.ville) + '</small>' : '') + '</p>' : '') +
@@ -390,7 +407,7 @@
       ((i.gars || []).length ? '<ul class="gars-l">' + i.gars.map(g =>
         '<li>' + esc(g.nom) + ' <b>' + euros(g.prix) + '</b></li>').join('') + '</ul>' : '') +
       (photos ? '<div class="photos n' + Math.min(nb, 3) + '">' + photos + '</div>' : '') +
-      '<div class="pied"><span>Ajouté par ' + esc(i.auteur || '?') + (nb ? ' · ' + nb + ' photo' + (nb > 1 ? 's' : '') : '') + '</span>' +
+      '<div class="pied"><span>Ajouté par ' + esc(i.auteur || '?') + (nb ? ' · ' + nb + ' photo' + (nb > 1 ? 's' : '') : '') + ' · <u>Modifier</u></span>' +
       '<span class="tot">' + euros(i.total) + '</span></div></div></article>';
   }
 
@@ -454,20 +471,38 @@
       gars: [], travaux: '', photos: [], trouve: {} };
   }
 
-  function ouvrirSaisie(avecMicro) {
-    S.draft = nouveauDraft();
+  // Brouillon rempli à partir d'une intervention déjà enregistrée
+  function draftDepuis(i) {
+    const d = nouveauDraft();
+    d.editId = i.id;
+    d.editPending = !!i.pending && i.action !== 'update';
+    d.original = { auteur: i.auteur, createdAt: i.createdAt, action: i.action };
+    d.date = i.date || today();
+    if (chantiersTries().some(c => c.nom === i.chantier)) d.chantierSel = i.chantier;
+    else { d.chantierSel = '__new'; d.newNom = i.chantier || ''; d.newVille = i.ville || ''; }
+    d.societe = i.societe || '';
+    d.gars = (i.gars || []).map(g => ({ nom: g.nom, prix: +g.prix || 0, prixDefaut: false }));
+    d.travaux = i.travaux || '';
+    d.photos = (i.photos || []).map(p => p.startsWith('data:') ? { url: p, data: p.split(',')[1] } : { url: srcPhoto(p, 300), id: p });
+    return d;
+  }
+
+  function ouvrirSaisie(avecMicro, inter) {
+    const edit = !!inter;
+    S.draft = edit ? draftDepuis(inter) : nouveauDraft();
     const el = document.createElement('div');
     el.className = 'ecran';
     el.id = 'saisie';
-    el.innerHTML = '<header class="tete"><div class="titre"><h1>Nouvelle intervention</h1></div><button class="ico-btn" data-act="fermer" aria-label="Fermer">' + ICO.fermer(22) + '</button></header>' +
-      '<main><section class="etape"><h2><span>1</span>Parlez</h2>' +
+    el.innerHTML = '<header class="tete"><div class="titre"><h1>' + (edit ? 'Modifier' : 'Nouvelle intervention') + '</h1>' +
+      (edit ? '<p>Ajoutée par ' + esc(inter.auteur || '?') + '</p>' : '') + '</div><button class="ico-btn" data-act="fermer" aria-label="Fermer">' + ICO.fermer(22) + '</button></header>' +
+      '<main><section class="etape' + (edit ? ' replie' : '') + '"><h2><span>1</span>' + (edit ? 'Redicter (facultatif)' : 'Parlez') + '</h2>' +
       '<div class="micro-zone"><button class="micro" id="micro" data-act="micro" aria-label="Dicter">' + ICO.micro(54) + '</button>' +
-      '<p class="micro-txt" id="micro-txt">Appuyez et dites tout d\'un coup</p>' +
-      '<p class="astuce" id="micro-astuce">Le chantier, la date, qui a travaillé, la société, les travaux et les prix.</p></div>' +
+      '<p class="micro-txt" id="micro-txt">' + (edit ? 'Appuyez pour tout redire' : 'Appuyez et dites tout d\'un coup') + '</p>' +
+      '<p class="astuce" id="micro-astuce">' + (edit ? 'Sinon, corrigez directement les cases ci-dessous.' : 'Le chantier, la date, qui a travaillé, la société, les travaux et les prix.') + '</p></div>' +
       '<label class="t" for="dictee">Ce que vous avez dit</label>' +
       '<textarea id="dictee" placeholder="Exemple : chantier Avignon, aujourd\'hui, Mohamed et Karim, MYL Services, nettoyage fin de chantier, 150 euros chacun"></textarea></section>' +
       '<div id="champs"></div></main>' +
-      '<div class="barre-save"><button class="btn jaune" data-act="enregistrer">Enregistrer l\'intervention</button></div>';
+      '<div class="barre-save"><button class="btn jaune" data-act="enregistrer">' + (edit ? 'Enregistrer les modifications' : 'Enregistrer l\'intervention') + '</button></div>';
     document.body.appendChild(el);
     document.body.style.overflow = 'hidden';
     let t;
@@ -581,7 +616,8 @@
       '<section class="etape"><h2><span>3</span>Photos <small>' + (d.photos.length || '') + '</small></h2><div class="photos-btn">' +
       '<button class="btn" data-act="camera">' + ICO.photo(20) + 'Photo</button><button class="btn sec" data-act="galerie">' + ICO.galerie(20) + 'Galerie</button></div>' +
       '<div class="vignettes">' + d.photos.map((p, i) => '<div><img src="' + p.url + '" alt="Photo ' + (i + 1) + '"><button data-act="suppr-photo" data-i="' + i + '" aria-label="Retirer">' + ICO.fermer(14) + '</button></div>').join('') + '</div>' +
-      '</section>';
+      '</section>' +
+      (d.editId ? '<button class="btn-suppr" data-act="supprimer">Supprimer cette intervention</button>' : '');
 
     $('#f-date').onchange = e => { d.date = e.target.value; };
     $('#f-chantier').onchange = e => {
@@ -655,18 +691,46 @@
     if (!d.gars.length && !confirm('Aucun gars sélectionné. Enregistrer quand même ?')) return;
     if (!d.societe && !confirm('Aucune société choisie (MYL / LCQ). Enregistrer quand même ?')) return;
     const item = {
-      id: uid(), date: d.date || today(), chantier, ville, societe: d.societe || '',
+      id: d.editId || uid(), date: d.date || today(), chantier, ville, societe: d.societe || '',
       gars: d.gars.map(g => ({ nom: g.nom, prix: +g.prix || 0 })),
       travaux: (d.travaux || '').trim(), auteur: S.auteur, createdAt: new Date().toISOString(),
-      photos: d.photos.map(p => ({ type: 'image/jpeg', data: p.data }))
+      photos: d.photos.filter(p => p.data).map(p => ({ type: 'image/jpeg', data: p.data }))
     };
+    if (d.editId) {
+      item.auteur = d.original.auteur || S.auteur;
+      item.createdAt = d.original.createdAt || item.createdAt;
+      // Pas encore envoyée : on remplace simplement l'ajout en attente
+      if (!d.editPending) {
+        item.action = 'update';
+        item.modifiePar = S.auteur;
+        item.garder = d.photos.filter(p => p.id).map(p => p.id);
+      }
+      S.outbox = S.outbox.filter(o => o.id !== item.id);
+    }
     try { await Outbox.put(item); } catch (e) { /* IndexedDB indisponible : on tente quand même l'envoi */ }
     S.outbox.unshift(item);
     if (item.societe) LS.set('lastSociete', item.societe);
     fermerSaisie();
     S.vue = 'liste';
     render();
-    toast('Intervention enregistrée');
+    toast(d.editId ? 'Modifications enregistrées' : 'Intervention enregistrée');
+    envoyer();
+  }
+
+  async function supprimer() {
+    const d = S.draft;
+    if (!d || !d.editId) return;
+    if (!confirm('Supprimer définitivement cette intervention ?\n(Les photos restent dans le Google Drive.)')) return;
+    S.outbox = S.outbox.filter(o => o.id !== d.editId);
+    if (d.editPending) await Outbox.del(d.editId).catch(() => {});
+    else {
+      const item = { action: 'delete', id: d.editId, createdAt: new Date().toISOString() };
+      await Outbox.put(item).catch(() => {});
+      S.outbox.unshift(item);
+    }
+    fermerSaisie();
+    render();
+    toast('Intervention supprimée');
     envoyer();
   }
 
@@ -794,7 +858,8 @@
     saisie() { ouvrirSaisie(true); },
     fermer() {
       const d = S.draft;
-      if (d && (d.transcript || d.photos.length || d.travaux) && !confirm('Abandonner cette intervention ?')) return;
+      if (d && d.editId) { if (!confirm('Fermer sans enregistrer les modifications ?')) return; }
+      else if (d && (d.transcript || d.photos.length || d.travaux) && !confirm('Abandonner cette intervention ?')) return;
       fermerSaisie();
     },
     micro() { Micro.toggle(); },
@@ -820,6 +885,11 @@
     galerie() { $('#galerie').click(); },
     'suppr-photo'(el) { S.draft.photos.splice(+el.dataset.i, 1); renderChamps(); },
     enregistrer() { enregistrer(); },
+    supprimer() { supprimer(); },
+    ouvrir(el) {
+      const i = toutes().find(x => x.id === el.dataset.id);
+      if (i) ouvrirSaisie(false, i);
+    },
     refresh() { toast('Actualisation…', 1200); envoyer(); },
     photo(el) {
       const lb = document.createElement('div');

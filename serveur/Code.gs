@@ -39,6 +39,8 @@ function doPost(e) {
     switch (b.action) {
       case 'add': return add_(b);
       case 'analyser': return analyser_(b);
+      case 'update': return update_(b);
+      case 'delete': return delete_(b);
       case 'addChantier': withLock_(() => ensureChantier_(book_(), b.nom, b.ville)); return {};
       case 'addGars': withLock_(() => ensureGars_(book_(), b.nom, b.prix, true)); return {};
       default: throw new Error('Action inconnue');
@@ -191,18 +193,7 @@ function add_(b) {
   if (withLock_(() => idExists_(sh, b.id))) return { dup: true };
 
   // Photos (hors verrou : c'est l'étape la plus longue)
-  const links = [];
-  const photos = b.photos || [];
-  if (photos.length) {
-    const folder = folderFor_(b.chantier);
-    photos.forEach((p, i) => {
-      const blob = Utilities.newBlob(Utilities.base64Decode(p.data), p.type || 'image/jpeg',
-        (b.date || '') + ' ' + (b.chantier || '') + ' - ' + (b.auteur || '') + ' ' + (i + 1) + '.jpg');
-      const f = folder.createFile(blob);
-      try { f.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (err) { /* domaine qui interdit le partage : l'appli passera par le serveur */ }
-      links.push('https://drive.google.com/file/d/' + f.getId() + '/view');
-    });
-  }
+  const links = uploadPhotos_(b);
 
   return withLock_(() => {
     if (idExists_(sh, b.id)) return { dup: true };
@@ -293,6 +284,72 @@ function analyser_(b) {
     };
   }
   return { ia: false, error: derniere };
+}
+
+function uploadPhotos_(b) {
+  const links = [];
+  const photos = b.photos || [];
+  if (!photos.length) return links;
+  const folder = folderFor_(b.chantier);
+  photos.forEach((p, i) => {
+    const blob = Utilities.newBlob(Utilities.base64Decode(p.data), p.type || 'image/jpeg',
+      (b.date || '') + ' ' + (b.chantier || '') + ' - ' + (b.auteur || b.modifiePar || '') + ' ' + (i + 1) + '.jpg');
+    const f = folder.createFile(blob);
+    try { f.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (err) { /* domaine qui interdit le partage : l'appli passera par le serveur */ }
+    links.push('https://drive.google.com/file/d/' + f.getId() + '/view');
+  });
+  return links;
+}
+
+// Numéro de ligne d'une intervention (les lignes tapées à la main dans le tableau ont l'id "ligne-N")
+function findRow_(sh, id) {
+  const n = sh.getLastRow();
+  if (n < 2) return -1;
+  const ids = sh.getRange(2, 1, n - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) if (String(ids[i][0]) === String(id)) return i + 2;
+  const m = String(id).match(/^ligne-(\d+)$/);
+  if (m && +m[1] >= 2 && +m[1] <= n && !ids[+m[1] - 2][0]) return +m[1];
+  return -1;
+}
+
+function update_(b) {
+  const book = book_();
+  const sh = book.getSheetByName(SHEET_INTER);
+  const nouvelles = uploadPhotos_(b);
+  return withLock_(() => {
+    const row = findRow_(sh, b.id);
+    if (row < 0) throw new Error('Intervention introuvable (déjà supprimée ?)');
+    const garder = (b.garder || []).map(String);
+    const anciennes = String(sh.getRange(row, 10).getValue() || '').split(/\n/).filter(l => {
+      const m = l.match(/[-\w]{25,}/);
+      return m && garder.indexOf(m[0]) >= 0;
+    });
+    ensureChantier_(book, b.chantier, b.ville);
+    const gars = (b.gars || []).filter(g => g && g.nom);
+    gars.forEach(g => ensureGars_(book, g.nom, g.prix, false));
+    const total = gars.reduce((s, g) => s + (Number(g.prix) || 0), 0);
+    const d = String(b.date || '').split('-').map(Number);
+    const date = d.length === 3 ? new Date(d[0], d[1] - 1, d[2], 12) : new Date();
+    sh.getRange(row, 2, 1, 9).setValues([[
+      date, b.chantier || '', b.ville || '', b.societe || '',
+      gars.map(g => g.nom).join(', '),
+      gars.map(g => g.nom + ' : ' + (Number(g.prix) || 0) + ' €').join(' / '),
+      total, b.travaux || '', anciennes.concat(nouvelles).join('\n')
+    ]]);
+    if (!sh.getRange(1, 13).getValue()) sh.getRange(1, 13).setValue('Modifié').setFontWeight('bold').setBackground('#1e3a5f').setFontColor('#ffffff');
+    sh.getRange(row, 13).setValue('par ' + (b.modifiePar || '?') + ' le ' + Utilities.formatDate(new Date(), book.getSpreadsheetTimeZone(), 'dd/MM/yyyy HH:mm'));
+    if (!sh.getRange(row, 1).getValue()) sh.getRange(row, 1).setValue(b.id);
+    return { id: b.id };
+  });
+}
+
+function delete_(b) {
+  const sh = book_().getSheetByName(SHEET_INTER);
+  return withLock_(() => {
+    const row = findRow_(sh, b.id);
+    if (row > 0) sh.deleteRow(row);   // déjà supprimée : rien à faire
+    return { id: b.id };
+  });
 }
 
 function photo_(id) {
