@@ -448,27 +448,61 @@
     S.draft = null;
   }
 
-  function analyser() {
+  function appliquer(res) {
     const d = S.draft;
     if (!d) return;
-    const res = window.Dictee.parseDictee(d.transcript, { gars: tousLesGars(), chantiers: chantiersTries() });
     const trouve = {};
-    d.date = res.date; trouve.date = res.dateTrouvee;
-    if (res.chantier) {
+    if (res.date) { d.date = res.date; trouve.date = res.dateTrouvee !== false; }
+    if (res.chantier && res.chantier.nom) {
       trouve.chantier = true;
-      if (res.chantier.nouveau) { d.chantierSel = '__new'; d.newNom = res.chantier.nom; d.newVille = ''; }
-      else d.chantierSel = res.chantier.nom;
+      const connu = chantiersTries().find(c => sameName(c.nom, res.chantier.nom));
+      if (connu) d.chantierSel = connu.nom;
+      else { d.chantierSel = '__new'; d.newNom = res.chantier.nom; d.newVille = res.chantier.ville || ''; }
     }
     if (res.societe) { d.societe = res.societe; trouve.societe = true; }
     else if (d.chantierSel && d.chantierSel !== '__new') {
       const last = toutes().filter(i => i.chantier === d.chantierSel && i.societe).sort((a, b) => b.date.localeCompare(a.date))[0];
       if (last) d.societe = last.societe;
     }
-    if (res.gars.length) { d.gars = res.gars.map(g => ({ nom: g.nom, prix: g.prix, prixDefaut: g.prixDefaut })); trouve.gars = true; }
-    else if (res.prixSeul != null) d.gars.forEach(g => { g.prix = res.prixSeul; g.prixDefaut = false; });
-    d.travaux = res.travaux; trouve.travaux = !!res.travaux;
+    if (res.gars && res.gars.length) {
+      d.gars = res.gars.map(g => {
+        const connu = tousLesGars().find(x => sameName(x.nom, g.nom));
+        const prix = g.prix == null || g.prix === '' ? (connu ? +connu.prix || 0 : 0) : +g.prix || 0;
+        return { nom: connu ? connu.nom : g.nom, prix, prixDefaut: g.prixDefaut || g.prix == null };
+      });
+      trouve.gars = true;
+    } else if (res.prixSeul != null) d.gars.forEach(g => { g.prix = res.prixSeul; g.prixDefaut = false; });
+    if (res.travaux != null) { d.travaux = res.travaux; trouve.travaux = !!res.travaux; }
     d.trouve = trouve;
     renderChamps();
+  }
+
+  function statutIA(txt) {
+    const a = $('#micro-astuce');
+    if (a) a.innerHTML = txt;
+  }
+
+  // 1) rangement immédiat sur le téléphone  2) l'IA Gemini (gratuite, via le script Google) corrige et complète
+  let iaSeq = 0;
+  function analyser() {
+    const d = S.draft;
+    if (!d) return Promise.resolve();
+    const texte = (d.transcript || '').trim();
+    appliquer(window.Dictee.parseDictee(texte, { gars: tousLesGars(), chantiers: chantiersTries() }));
+    d.analyseDe = texte;
+    if (DEMO || texte.length < 8) return Promise.resolve();
+    const seq = ++iaSeq;
+    statutIA('🤖 L\'IA range votre dictée…');
+    const t = new Date();
+    d.iaEnCours = apiPost({ action: 'analyser', texte,
+      aujourdhui: today(), jour: t.toLocaleDateString('fr-FR', { weekday: 'long' }) })
+      .then(j => {
+        if (seq !== iaSeq || !S.draft) return;
+        if (j.ia && j.resultat) { appliquer(j.resultat); statutIA('✅ Rangé par l\'IA — vérifiez puis enregistrez'); }
+        else statutIA(j.error ? '⚠️ IA indisponible, rangement simple utilisé' : 'Rangement simple (IA pas encore activée)');
+      })
+      .catch(() => { if (seq === iaSeq) statutIA('📴 Pas de réseau : rangement simple utilisé'); });
+    return d.iaEnCours;
   }
 
   function renderChamps() {
@@ -567,7 +601,17 @@
 
   async function enregistrer() {
     const d = S.draft;
+    const ta = $('#dictee');
     Micro.stop(true);
+    if (ta) d.transcript = ta.value;
+    // On n'enregistre pas une dictée pas encore rangée
+    if ((d.transcript || '').trim() !== (d.analyseDe || '')) analyser();
+    if (d.iaEnCours) {
+      toast('🤖 Rangement en cours…', 1500);
+      await Promise.race([d.iaEnCours, new Promise(r => setTimeout(r, 15000))]);
+      d.iaEnCours = null;
+      if (!S.draft) return;
+    }
     let chantier = d.chantierSel === '__new' ? d.newNom.trim() : d.chantierSel;
     let ville = d.chantierSel === '__new' ? d.newVille.trim() : ((chantiersTries().find(c => c.nom === chantier) || {}).ville || '');
     if (!chantier) { toast('Choisissez le chantier 🏗️'); $('#f-chantier').focus(); return; }
