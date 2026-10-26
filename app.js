@@ -106,7 +106,8 @@
     horsLigne: false,
     majLe: LS.get('majLe', null),
     draft: null,
-    recherche: ''
+    recherche: '',
+    groupe: LS.get('groupe', 'mois')
   };
 
   // ---------------------------------------------------------------- utilitaires
@@ -282,8 +283,9 @@
     const sem = list.filter(i => i.date >= iso(lundi));
     const mois = list.filter(i => i.date >= iso(new Date(t.getFullYear(), t.getMonth(), 1)));
     const somme = l => l.reduce((s, i) => s + totalDe(i), 0);
-    const tuile = (val, lib) => '<div class="tuile"><span>' + lib + '</span><b>' + val + '</b></div>';
-    return tuile(sem.length, 'Interventions cette semaine') + tuile(euros(somme(sem)), 'Cette semaine') + tuile(euros(somme(mois)), 'Ce mois-ci');
+    const nomMois = t.toLocaleDateString('fr-FR', { month: 'long' });
+    return '<div class="h-mois"><span>' + nomMois + '</span><b>' + euros(somme(mois)) + '</b></div>' +
+      '<div class="h-sem"><span><b>' + euros(somme(sem)) + '</b> cette semaine</span><span><b>' + sem.length + '</b> intervention' + (sem.length > 1 ? 's' : '') + '</span></div>';
   }
 
   function listeHtml(list, toutesNb) {
@@ -293,24 +295,37 @@
           '<p>Appuyez sur <b>Nouvelle</b> en bas de l\'écran, puis dites tout d\'un coup :</p><p class="exemple">« Chantier Avignon, aujourd\'hui, Mohamed et Karim, MYL Services, nettoyage fin de chantier, 150 euros chacun. »</p>') +
         '</div>';
     }
+    const parMois = S.groupe !== 'chantier';
+    const cle = i => parMois ? (String(i.date || '').slice(0, 7) || 'sans-date') : (i.chantier || '(sans chantier)');
     const groupes = {};
-    list.forEach(i => { const k = i.chantier || '(sans chantier)'; (groupes[k] = groupes[k] || []).push(i); });
+    list.forEach(i => { const k = cle(i); (groupes[k] = groupes[k] || []).push(i); });
     const tri = (a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || '').localeCompare(a.createdAt || '');
     Object.values(groupes).forEach(g => g.sort(tri));
-    const ordre = Object.keys(groupes).sort((a, b) => tri(groupes[a][0], groupes[b][0]));
+    const ordre = Object.keys(groupes).sort((a, b) => parMois ? b.localeCompare(a) : tri(groupes[a][0], groupes[b][0]));
     const plies = LS.get('plies', []);
-    let h = '<div class="resume"><span>' + list.length + ' intervention' + (list.length > 1 ? 's' : '') + ' · ' + ordre.length + ' chantier' + (ordre.length > 1 ? 's' : '') + '</span>' +
+    const pl = (n, mot) => n + ' ' + mot + (n > 1 ? 's' : '');
+    let h = '<div class="resume"><span>' + pl(list.length, 'intervention') + ' · ' + (parMois ? ordre.length + ' mois' : pl(ordre.length, 'chantier')) + '</span>' +
       '<b>' + euros(list.reduce((s, i) => s + totalDe(i), 0)) + (S.filtres.gars ? ' pour ' + esc(S.filtres.gars) : '') + '</b></div>';
-    ordre.forEach(nom => {
-      const g = groupes[nom];
-      const ville = (g.find(i => i.ville) || {}).ville || ((S.data.chantiers.find(c => c.nom === nom) || {}).ville) || '';
-      const plie = plies.includes(nom);
+    ordre.forEach(k => {
+      const g = groupes[k];
+      const id = (parMois ? 'm:' : 'c:') + k;
+      const plie = plies.includes(id);
+      let titre, sous;
+      if (parMois) {
+        const [y, m] = k.split('-').map(Number);
+        titre = y ? new Date(y, m - 1, 1).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }) : 'Sans date';
+        sous = pl(g.length, 'intervention') + ' · ' + pl(new Set(g.map(i => i.chantier)).size, 'chantier');
+      } else {
+        const ville = (g.find(i => i.ville) || {}).ville || ((S.data.chantiers.find(c => c.nom === k) || {}).ville) || '';
+        titre = k;
+        sous = (ville && !sameName(ville, k) ? esc(ville) + ' · ' : '') + pl(g.length, 'intervention');
+      }
       h += '<section class="groupe' + (plie ? ' plie' : '') + '">' +
-        '<button class="g-tete" data-act="plier" data-nom="' + esc(nom) + '">' +
-        '<span class="g-nom"><b>' + esc(nom) + '</b><small>' + (ville && !sameName(ville, nom) ? esc(ville) + ' · ' : '') + g.length + ' intervention' + (g.length > 1 ? 's' : '') + '</small></span>' +
+        '<button class="g-tete" data-act="plier" data-nom="' + esc(id) + '">' +
+        '<span class="g-nom"><b>' + esc(titre) + '</b><small>' + sous + '</small></span>' +
         '<span class="g-tot">' + euros(g.reduce((s, i) => s + totalDe(i), 0)) + '</span>' +
         '<span class="g-fleche">' + ICO.chevron(18) + '</span></button>' +
-        (plie ? '' : '<div class="g-corps">' + g.map(carte).join('') + '</div>') + '</section>';
+        (plie ? '' : '<div class="g-corps">' + g.map(i => carte(i, parMois)).join('') + '</div>') + '</section>';
     });
     return h;
   }
@@ -325,7 +340,10 @@
 
     let h = '<header class="tete"><div class="titre"><h1>Suivi chantiers</h1><p>MYL Services · LCQ Bâtiment</p></div>' +
       '<span class="sync" id="etat"></span><button class="ico-btn" data-act="refresh" aria-label="Actualiser">' + ICO.maj(20) + '</button></header><main>' +
-      '<div class="tuiles" id="stats">' + statsHtml(list) + '</div>';
+      '<div class="chiffres" id="stats">' + statsHtml(list) + '</div>' +
+      '<div class="vue-choix">' +
+      '<button data-act="groupe" data-v="mois" class="' + (S.groupe !== 'chantier' ? 'on' : '') + '">Par mois</button>' +
+      '<button data-act="groupe" data-v="chantier" class="' + (S.groupe === 'chantier' ? 'on' : '') + '">Par chantier</button></div>';
     if (DEMO) h += '<div class="demo">Mode essai : les données restent sur ce téléphone.</div>';
     h += '<div class="recherche">' + ICO.loupe(18) + '<input type="search" id="recherche" placeholder="Rechercher (chantier, travaux, gars…)" value="' + esc(S.recherche || '') + '"></div>' +
       '<div class="filtres">' +
@@ -353,7 +371,7 @@
     return 'hsl(' + h + ',55%,45%)';
   }
 
-  function carte(i) {
+  function carte(i, montrerChantier) {
     const soc = i.societe === 'MYL Services' ? 'myl' : i.societe === 'LCQ Bâtiment' ? 'lcq' : 'aucune';
     const nb = (i.photos || []).length;
     const photos = (i.photos || []).map(p =>
@@ -367,6 +385,7 @@
     return '<article class="carte ' + soc + (i.pending ? ' attente' : '') + '">' + colDate + '<div class="c-corps">' +
       '<div class="l1"><span class="rel">' + (rel === "Aujourd'hui" || rel === 'Hier' ? rel : '') + '</span>' +
       (i.pending ? '<span class="badge attente">En attente d\'envoi</span>' : badge(i.societe)) + '</div>' +
+      (montrerChantier ? '<p class="c-chantier">' + ICO.lieu(15) + esc(i.chantier || 'Sans chantier') + (i.ville && !sameName(i.ville, i.chantier) ? ' <small>· ' + esc(i.ville) + '</small>' : '') + '</p>' : '') +
       (i.travaux ? '<p class="travaux">' + esc(i.travaux) + '</p>' : '<p class="travaux vide-tr">Travaux non précisés</p>') +
       ((i.gars || []).length ? '<ul class="gars-l">' + i.gars.map(g =>
         '<li>' + esc(g.nom) + ' <b>' + euros(g.prix) + '</b></li>').join('') + '</ul>' : '') +
@@ -762,6 +781,7 @@
   // ---------------------------------------------------------------- actions
   const actions = {
     vue(el) { S.vue = el.dataset.vue; render(); window.scrollTo(0, 0); },
+    groupe(el) { S.groupe = el.dataset.v; LS.set('groupe', S.groupe); render(); },
     'f-soc'(el) { S.filtres.societe = el.dataset.v; LS.set('filtres', S.filtres); render(); },
     effacer() { S.filtres = { chantier: '', gars: '', societe: '' }; S.recherche = ''; LS.set('filtres', S.filtres); render(); },
     plier(el) {
