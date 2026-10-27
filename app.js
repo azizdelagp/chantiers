@@ -71,6 +71,8 @@
           total: (b.gars || []).reduce((s, g) => s + (+g.prix || 0), 0),
           photos: (b.garder || []).concat((b.photos || []).map(p => 'data:' + p.type + ';base64,' + p.data)) });
       } else if (b.action === 'delete') db.interventions = db.interventions.filter(x => x.id !== b.id);
+      else if (b.action === 'addRegle') (db.regles = db.regles || []).push(b.texte);
+      else if (b.action === 'delRegle') db.regles = (db.regles || []).filter(r => r !== b.texte);
       else if (b.action === 'addChantier') this.ensure(db.chantiers, b.nom, { ville: b.ville || '' });
       else if (b.action === 'addGars') {
         const g = db.gars.find(x => x.nom.toLowerCase() === b.nom.toLowerCase());
@@ -201,7 +203,8 @@
   async function rafraichir() {
     try {
       const j = await apiGet({ action: 'all' });
-      S.data = { interventions: j.interventions || [], chantiers: j.chantiers || [], gars: j.gars || [], sheetUrl: j.sheetUrl || '' };
+      S.data = { interventions: j.interventions || [], chantiers: j.chantiers || [], gars: j.gars || [],
+        regles: j.regles || [], nbExemples: j.nbExemples || 0, sheetUrl: j.sheetUrl || '' };
       S.horsLigne = false;
       S.majLe = Date.now();
       LS.set('cache', S.data);
@@ -447,6 +450,13 @@
       '<div class="ajout"><input type="text" id="g-nom" placeholder="Prénom"><input type="number" id="g-prix" inputmode="decimal" placeholder="Prix €">' +
       '<button class="btn" data-act="add-gars" aria-label="Ajouter le gars">' + ICO.plus(20) + '</button></div>' +
       '<p class="note">Pour changer le prix habituel d\'un gars, ajoutez-le à nouveau avec le nouveau prix.</p></div>' +
+
+      '<div class="bloc"><h3>Mémoire de l\'IA <small>' + (S.data.nbExemples || 0) + ' dictée' + ((S.data.nbExemples || 0) > 1 ? 's' : '') + ' apprise' + ((S.data.nbExemples || 0) > 1 ? 's' : '') + '</small></h3>' +
+      '<p class="note" style="margin-top:0">L\'IA apprend toute seule à chaque intervention enregistrée après une dictée : si vous corrigez une case, elle s\'en souvient la fois suivante. Vous pouvez aussi lui donner des règles :</p>' +
+      ((S.data.regles || []).length ? '<ul class="liste-simple regles">' + S.data.regles.map(r =>
+        '<li><span>' + esc(r) + '</span><button class="ico-btn petit" data-act="del-regle" data-texte="' + esc(r) + '" aria-label="Supprimer la règle">' + ICO.fermer(16) + '</button></li>').join('') + '</ul>' : '') +
+      '<div class="ajout regle"><input type="text" id="regle" placeholder="Ex. : « la villa » = chantier Villa Dupont"><button class="btn" data-act="add-regle" aria-label="Ajouter la règle">' + ICO.plus(20) + '</button></div>' +
+      '<p class="note">Autres exemples : « Mo » c\'est Mohamed · « Émile » ou « mil » c\'est MYL Services · le chantier de Cassis est toujours pour LCQ Bâtiment.</p></div>' +
 
       '<div class="bloc"><h3>Partager l\'appli aux gars</h3>' +
       '<button class="btn jaune large" data-act="partager">' + ICO.partage(20) + 'Envoyer le lien</button>' +
@@ -696,6 +706,8 @@
       travaux: (d.travaux || '').trim(), auteur: S.auteur, createdAt: new Date().toISOString(),
       photos: d.photos.filter(p => p.data).map(p => ({ type: 'image/jpeg', data: p.data }))
     };
+    // La dictée + la fiche finale servent d'exemple à la mémoire de l'IA
+    if ((d.transcript || '').trim()) item.dictee = d.transcript.trim();
     if (d.editId) {
       item.auteur = d.original.auteur || S.auteur;
       item.createdAt = d.original.createdAt || item.createdAt;
@@ -912,6 +924,22 @@
       if (!S.data.chantiers.some(c => sameName(c.nom, nom))) S.data.chantiers.push({ nom, ville });
       render();
       try { await apiPost({ action: 'addChantier', nom, ville }); toast('Chantier ajouté'); rafraichir(); }
+      catch (e) { toast('Pas de réseau : réessayez plus tard'); }
+    },
+    async 'add-regle'() {
+      const texte = ($('#regle').value || '').trim();
+      if (!texte) { toast('Écrivez la règle'); return; }
+      S.data.regles = (S.data.regles || []).concat(texte);
+      render();
+      try { await apiPost({ action: 'addRegle', texte }); toast('Règle retenue'); rafraichir(); }
+      catch (e) { toast('Pas de réseau : réessayez plus tard'); }
+    },
+    async 'del-regle'(el) {
+      const texte = el.dataset.texte;
+      if (!confirm('Oublier cette règle ?')) return;
+      S.data.regles = (S.data.regles || []).filter(r => r !== texte);
+      render();
+      try { await apiPost({ action: 'delRegle', texte }); rafraichir(); }
       catch (e) { toast('Pas de réseau : réessayez plus tard'); }
     },
     async 'add-gars'() {

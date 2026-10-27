@@ -41,6 +41,8 @@ function doPost(e) {
       case 'analyser': return analyser_(b);
       case 'update': return update_(b);
       case 'delete': return delete_(b);
+      case 'addRegle': withLock_(() => memoire_(book_()).appendRow(['règle', String(b.texte || '').trim(), '', new Date()])); return {};
+      case 'delRegle': return delRegle_(b);
       case 'addChantier': withLock_(() => ensureChantier_(book_(), b.nom, b.ville)); return {};
       case 'addGars': withLock_(() => ensureGars_(book_(), b.nom, b.prix, true)); return {};
       default: throw new Error('Action inconnue');
@@ -150,7 +152,48 @@ function all_() {
     .map(r => ({ nom: String(r[0]).trim(), ville: String(r[1] || '').trim() }));
   const gars = rows_(book.getSheetByName(SHEET_GARS)).filter(r => r[0])
     .map(r => ({ nom: String(r[0]).trim(), prix: Number(r[1]) || 0 }));
-  return { interventions, chantiers, gars, sheetUrl: book.getUrl() };
+  const mem = rows_(memoire_(book));
+  const regles = mem.filter(r => r[0] === 'règle' && r[1]).map(r => String(r[1]));
+  const nbExemples = mem.filter(r => r[0] === 'exemple').length;
+  return { interventions, chantiers, gars, regles, nbExemples, sheetUrl: book.getUrl() };
+}
+
+// ---------------------------------------------------------------------------
+// Mémoire de l'IA : règles données par le patron + dictées corrigées (exemples)
+
+const SHEET_MEMOIRE = 'Mémoire';
+
+function memoire_(book) {
+  let sh = book.getSheetByName(SHEET_MEMOIRE);
+  if (!sh) {
+    sh = book.insertSheet(SHEET_MEMOIRE);
+    sh.appendRow(['Type', 'Dicté / Règle', 'Fiche retenue', 'Date']);
+    sh.getRange(1, 1, 1, 4).setFontWeight('bold');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(2, 420); sh.setColumnWidth(3, 420);
+  }
+  return sh;
+}
+
+// Chaque intervention enregistrée après une dictée devient un exemple pour la suivante
+function apprendre_(book, b, gars) {
+  const dictee = String(b.dictee || '').trim();
+  if (!dictee) return;
+  memoire_(book).appendRow(['exemple', dictee, JSON.stringify({
+    chantier: b.chantier || '', ville: b.ville || '', societe: b.societe || '',
+    gars: gars.map(g => ({ nom: g.nom, prix: Number(g.prix) || 0 })), travaux: b.travaux || ''
+  }), new Date()]);
+}
+
+function delRegle_(b) {
+  return withLock_(() => {
+    const sh = memoire_(book_());
+    const rows = rows_(sh);
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i][0] === 'règle' && String(rows[i][1]) === String(b.texte)) { sh.deleteRow(i + 2); break; }
+    }
+    return {};
+  });
 }
 
 function ensureChantier_(book, nom, ville) {
@@ -209,6 +252,7 @@ function add_(b) {
       gars.map(g => g.nom + ' : ' + (Number(g.prix) || 0) + ' €').join(' / '),
       total, b.travaux || '', links.join('\n'), b.auteur || '', new Date()
     ]);
+    apprendre_(book, b, gars);
     return { id: b.id };
   });
 }
@@ -227,6 +271,9 @@ function analyser_(b) {
   const book = book_();
   const chantiers = rows_(book.getSheetByName(SHEET_CHANTIERS)).filter(r => r[0]).map(r => r[0] + (r[1] ? ' (' + r[1] + ')' : ''));
   const gars = rows_(book.getSheetByName(SHEET_GARS)).filter(r => r[0]).map(r => r[0] + ' : ' + (Number(r[1]) || 0) + ' €');
+  const mem = rows_(memoire_(book));
+  const regles = mem.filter(r => r[0] === 'règle' && r[1]).map(r => '- ' + r[1]);
+  const exemples = mem.filter(r => r[0] === 'exemple' && r[1]).slice(-30).map(r => '- "' + r[1] + '" → ' + r[2]);
 
   const prompt = [
     'Tu ranges la dictée vocale d\'un chef de chantier (BTP, Marseille / PACA) dans une fiche d\'intervention.',
@@ -244,6 +291,8 @@ function analyser_(b) {
     '- societe : "MYL Services", "LCQ Bâtiment" ou "" si non dite.',
     '- travaux : uniquement le travail réalisé, réécrit proprement en français correct, phrase courte et claire (ex. "Nettoyage de fin de chantier"). N\'y mets ni la date, ni le chantier, ni les noms, ni la société, ni les prix.',
     '',
+    regles.length ? 'RÈGLES DU PATRON (prioritaires sur tout le reste) :\n' + regles.join('\n') + '\n' : '',
+    exemples.length ? 'MÉMOIRE — dictées passées et la fiche finale validée par l\'équipe. Sers-t\'en pour reconnaître les surnoms, les erreurs de transcription habituelles du micro, les chantiers et les prix habituels :\n' + exemples.join('\n') + '\n' : '',
     'Dictée : """' + texte + '"""',
     '',
     'Réponds UNIQUEMENT avec ce JSON :',
@@ -339,6 +388,7 @@ function update_(b) {
     if (!sh.getRange(1, 13).getValue()) sh.getRange(1, 13).setValue('Modifié').setFontWeight('bold').setBackground('#1e3a5f').setFontColor('#ffffff');
     sh.getRange(row, 13).setValue('par ' + (b.modifiePar || '?') + ' le ' + Utilities.formatDate(new Date(), book.getSpreadsheetTimeZone(), 'dd/MM/yyyy HH:mm'));
     if (!sh.getRange(row, 1).getValue()) sh.getRange(row, 1).setValue(b.id);
+    apprendre_(book, b, gars);
     return { id: b.id };
   });
 }
